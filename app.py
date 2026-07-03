@@ -16,6 +16,41 @@ from reportlab.lib.utils import ImageReader
 # =========================
 st.set_page_config(layout="wide")
 
+# =========================
+# SIMPLE LOCK (single user)
+# =========================
+def login_gate():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return
+
+    st.title("Login Required")
+
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("Login")
+
+    if submitted:
+        cfg = st.secrets.get("auth", {})
+        ok = (username == cfg.get("username")) and (password == cfg.get("password"))
+
+        if ok:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+
+    st.stop()
+
+login_gate()
+
+if st.sidebar.button("Logout", key="logout_btn"):
+    st.session_state.authenticated = False
+    st.rerun()
+
 # SAFE KALEIDO CHECK
 try:
     import kaleido  # noqa: F401
@@ -527,17 +562,17 @@ with tab_dashboard:
             name="Reference"
         ))
 
-        # 3) Actual last (top) - GREEN (thin)
+        # 3) Actual last (top) - GREEN
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
             y=merged["AvgPower"],
             mode="lines+markers",
             line=dict(
-                width=2,    
+                width=4,
                 color="green"
             ),
             marker=dict(
-                size=3,
+                size=6,
                 color="green"
             ),
             name="Actual"
