@@ -599,7 +599,7 @@ with tab_dashboard:
     # =========================
     # PROCESS TURBINE
     # =========================
-    def process_turbine(t):
+        def process_turbine(t):
         df_t = df[df["Name"] == t].copy()
 
         df_t = df_t[
@@ -608,7 +608,7 @@ with tab_dashboard:
             (df_t[power_col] > 0) &
             (df_t[pitch_col] >= -5) &
             (df_t[pitch_col] <= 5)
-        ]
+        ].copy()
 
         if len(df_t) < 30:
             return None
@@ -632,12 +632,24 @@ with tab_dashboard:
             )
 
         merged["Deviation_%"] = np.where(
-        merged["RefPower"] > 0,
-        ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100,
-        np.nan
-    )
+            merged["RefPower"] > 0,
+            ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100,
+            np.nan
+        )
 
-cfg = get_site_dev_settings(site)
+        cfg = get_site_dev_settings(site)
+
+        # Default = old method (mean of bin deviations)
+        avg_dev = merged["Deviation_%"].mean(skipna=True)
+
+        # Optional override if enabled for this site
+        if cfg["enabled"] and cfg["method"] == "weighted_mean_bins":
+            w = merged["N"].fillna(0)
+            d = merged["Deviation_%"]
+            if d.notna().any():
+                avg_dev = np.average(d.dropna(), weights=w.loc[d.notna()])
+
+        return df_t, merged, avg_dev, std_dev
 
 # Default = old behavior (unchanged)
 avg_dev = merged["Deviation_%"].mean(skipna=True)
@@ -716,28 +728,28 @@ if cfg["enabled"] and cfg["method"] == "weighted_mean_bins":
     # =========================
     # COMMENT
     # =========================
-    def generate_comment(dev):
-    if dev is None or pd.isna(dev):
-        return "Data not available"
+        def generate_comment(dev):
+        if dev is None or pd.isna(dev):
+            return "Data not available"
 
-    dev = round(float(dev), 2)
-    cfg = get_site_dev_settings(site)
-    thr = cfg["thresholds"]
+        dev = round(float(dev), 2)
+        cfg = get_site_dev_settings(site)
+        thr = cfg["thresholds"]
 
-    if dev < thr["extreme_low"]:
-        return f"Dev: {dev}% → Extreme issue (Data unreliable)"
-    elif dev < thr["severe_under"]:
-        return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
-    elif dev < thr["normal_low"]:
-        return f"Dev: {dev}% → Underperformance (Control/availability)"
-    elif dev > thr["abnormal_high"]:
-        return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
-    elif dev > thr["high_over"]:
-        return f"Dev: {dev}% → High overperformance"
-    elif dev > thr["normal_high"]:
-        return f"Dev: {dev}% → Slight overperformance"
-    else:
-        return f"Dev: {dev}% → Normal performance"
+        if dev < thr["extreme_low"]:
+            return f"Dev: {dev}% → Extreme issue (Data unreliable)"
+        elif dev < thr["severe_under"]:
+            return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
+        elif dev < thr["normal_low"]:
+            return f"Dev: {dev}% → Underperformance (Control/availability)"
+        elif dev > thr["abnormal_high"]:
+            return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
+        elif dev > thr["high_over"]:
+            return f"Dev: {dev}% → High overperformance"
+        elif dev > thr["normal_high"]:
+            return f"Dev: {dev}% → Slight overperformance"
+        else:
+            return f"Dev: {dev}% → Normal performance"
 
     # =========================
     # MODE
