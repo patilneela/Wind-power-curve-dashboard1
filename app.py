@@ -6,7 +6,7 @@ from scipy.signal import savgol_filter
 from datetime import timedelta
 import os
 import io
-import json
+
 
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.pdfgen import canvas
@@ -209,63 +209,6 @@ def load_site_capacity():
 
 SITE_CAPACITY = load_site_capacity()
 
-DEV_SETTINGS_PATH = os.path.join(BASE_DIR, "deviation_settings.json")
-
-DEFAULT_SITE_DEV_SETTINGS = {
-    "enabled": False,              # False => old behavior exactly
-    "method": "old_mean_bins",     # old_mean_bins OR weighted_mean_bins
-    "thresholds": {
-        "normal_low": -2.0,
-        "normal_high": 2.0,
-        "severe_under": -10.0,
-        "high_over": 8.0,
-        "abnormal_high": 72.0,
-        "extreme_low": -72.0
-    }
-}
-
-def _deepcopy(obj):
-    return json.loads(json.dumps(obj))
-
-def load_all_dev_settings():
-    """Return dict: {site_name: settings_dict}"""
-    if not os.path.exists(DEV_SETTINGS_PATH):
-        return {}
-    try:
-        with open(DEV_SETTINGS_PATH, "r") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-def save_all_dev_settings(all_settings: dict):
-    with open(DEV_SETTINGS_PATH, "w") as f:
-        json.dump(all_settings, f, indent=2)
-
-def get_site_dev_settings(site_name: str):
-    """Merge defaults with per-site overrides; always returns a complete dict."""
-    all_settings = load_all_dev_settings()
-    s = all_settings.get(site_name, {})
-    out = _deepcopy(DEFAULT_SITE_DEV_SETTINGS)
-
-    out["enabled"] = bool(s.get("enabled", out["enabled"]))
-    out["method"] = s.get("method", out["method"])
-
-    if isinstance(s.get("thresholds"), dict):
-        out["thresholds"].update(s["thresholds"])
-
-    return out
-
-def set_site_dev_settings(site_name: str, settings_dict: dict):
-    all_settings = load_all_dev_settings()
-    all_settings[site_name] = settings_dict
-    save_all_dev_settings(all_settings)
-
-def reset_site_dev_settings(site_name: str):
-    all_settings = load_all_dev_settings()
-    if site_name in all_settings:
-        del all_settings[site_name]
-        save_all_dev_settings(all_settings)
 
 # =========================
 # TABS
@@ -392,54 +335,6 @@ with tab_admin:
             except Exception as e:
                 st.error("Unable to read Site Master file.")
                 st.code(str(e))
-
-    st.divider()
-    st.markdown("## 3) Deviation Settings (Per Site)")
-
-    site_for_settings = st.selectbox(
-        "Select site to configure deviation",
-        list(SITE_CAPACITY.keys()),
-        key="dev_site_select"
-    )
-
-    current = get_site_dev_settings(site_for_settings)
-    thr = current["thresholds"]
-
-    enabled = st.checkbox("Enable custom deviation for this site", value=current["enabled"])
-
-    method_label = st.selectbox(
-        "Deviation calculation method",
-        ["Old method (mean of bin deviations)", "Weighted mean (by bin sample count)"],
-        index=0 if current["method"] == "old_mean_bins" else 1
-    )
-    method = "old_mean_bins" if method_label.startswith("Old") else "weighted_mean_bins"
-
-    st.markdown("### Thresholds (%)")
-    normal_low = st.number_input("Normal low", value=float(thr["normal_low"]))
-    normal_high = st.number_input("Normal high", value=float(thr["normal_high"]))
-    severe_under = st.number_input("Severe under", value=float(thr["severe_under"]))
-    high_over = st.number_input("High over", value=float(thr["high_over"]))
-
-    cA, cB = st.columns(2)
-    with cA:
-        if st.button("Save deviation settings", key="save_dev_settings"):
-            new_settings = _deepcopy(DEFAULT_SITE_DEV_SETTINGS)
-            new_settings["enabled"] = bool(enabled)
-            new_settings["method"] = method
-            new_settings["thresholds"]["normal_low"] = float(normal_low)
-            new_settings["thresholds"]["normal_high"] = float(normal_high)
-            new_settings["thresholds"]["severe_under"] = float(severe_under)
-            new_settings["thresholds"]["high_over"] = float(high_over)
-
-            set_site_dev_settings(site_for_settings, new_settings)
-            st.success(f"Saved deviation settings for {site_for_settings}.")
-            st.rerun()
-
-    with cB:
-        if st.button("Reset this site to default (old method)", key="reset_dev_settings"):
-            reset_site_dev_settings(site_for_settings)
-            st.success(f"Reset deviation settings for {site_for_settings} to defaults.")
-            st.rerun()
 
 # ==========================================================
 # TAB: DASHBOARD
@@ -599,7 +494,7 @@ with tab_dashboard:
     # =========================
     # PROCESS TURBINE
     # =========================
-        def process_turbine(t):
+    def process_turbine(t):
         df_t = df[df["Name"] == t].copy()
 
         df_t = df_t[
@@ -608,7 +503,7 @@ with tab_dashboard:
             (df_t[power_col] > 0) &
             (df_t[pitch_col] >= -5) &
             (df_t[pitch_col] <= 5)
-        ].copy()
+        ]
 
         if len(df_t) < 30:
             return None
@@ -617,8 +512,7 @@ with tab_dashboard:
         df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
 
         actual = df_t.groupby("WindBin").agg(
-            AvgPower=(power_col, "mean"),
-            N=(power_col, "size")
+            AvgPower=(power_col, "mean")
         ).reset_index()
 
         merged = ref_curve.merge(actual, on="WindBin", how="left")
@@ -631,35 +525,8 @@ with tab_dashboard:
                 2
             )
 
-        merged["Deviation_%"] = np.where(
-            merged["RefPower"] > 0,
-            ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100,
-            np.nan
-        )
-
-        cfg = get_site_dev_settings(site)
-
-        # Default = old method (mean of bin deviations)
+        merged["Deviation_%"] = ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100
         avg_dev = merged["Deviation_%"].mean(skipna=True)
-
-        # Optional override if enabled for this site
-        if cfg["enabled"] and cfg["method"] == "weighted_mean_bins":
-            w = merged["N"].fillna(0)
-            d = merged["Deviation_%"]
-            if d.notna().any():
-                avg_dev = np.average(d.dropna(), weights=w.loc[d.notna()])
-
-        return df_t, merged, avg_dev, std_dev
-
-# Default = old behavior (unchanged)
-avg_dev = merged["Deviation_%"].mean(skipna=True)
-
-# Only override if enabled for this site
-if cfg["enabled"] and cfg["method"] == "weighted_mean_bins":
-    w = merged["N"].fillna(0)
-    d = merged["Deviation_%"]
-    if d.notna().any():
-        avg_dev = np.average(d.dropna(), weights=w.loc[d.notna()])
 
         return df_t, merged, avg_dev, std_dev
 
@@ -728,25 +595,23 @@ if cfg["enabled"] and cfg["method"] == "weighted_mean_bins":
     # =========================
     # COMMENT
     # =========================
-        def generate_comment(dev):
-        if dev is None or pd.isna(dev):
+    def generate_comment(dev):
+        if dev is None:
             return "Data not available"
 
-        dev = round(float(dev), 2)
-        cfg = get_site_dev_settings(site)
-        thr = cfg["thresholds"]
+        dev = round(dev, 2)
 
-        if dev < thr["extreme_low"]:
+        if dev < -72:
             return f"Dev: {dev}% → Extreme issue (Data unreliable)"
-        elif dev < thr["severe_under"]:
+        elif dev < -10:
             return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
-        elif dev < thr["normal_low"]:
+        elif dev < -2:
             return f"Dev: {dev}% → Underperformance (Control/availability)"
-        elif dev > thr["abnormal_high"]:
+        elif dev > 72:
             return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
-        elif dev > thr["high_over"]:
+        elif dev > 8:
             return f"Dev: {dev}% → High overperformance"
-        elif dev > thr["normal_high"]:
+        elif dev > 2:
             return f"Dev: {dev}% → Slight overperformance"
         else:
             return f"Dev: {dev}% → Normal performance"
