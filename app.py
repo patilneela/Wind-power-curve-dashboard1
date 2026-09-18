@@ -1419,18 +1419,8 @@ Please check the new Excel file.
 
 The Excel should contain columns similar to:
 
-Wind Speed
-Reference Power
-
-or
-
 WindSpeed
 Power
-
-or
-
-Wind Speed
-Theoretical Power
 """
             )
 
