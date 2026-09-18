@@ -141,39 +141,10 @@ DEFAULT_SITE_CAPACITY = {
 
     for site in [
 
-        "CIP Hatalageri",
-        "JSW Tuljapur",
-        "Blupine Sagapara",
-        "Kalavad GJ",
-        "Kalavad_PH2",
-        "AMP_Energy",
-        "Wanki",
-        "CleanMax Motadevaliya",
-        "Ayana Amerli",
-        "Mahadev PH1",
-        "Blupine-I, Ambada-GJ",
-        "ACME Shapar",
-        "FP_Kudligi",
-        "Sprng TN",
-        "Otha Pithalpur-GJ",
-        "AMGEPL,Kurnool AP",
-        "ReNew1_Gadag",
-        "partner Ottapidaum",
-        "Cleanmax SANATHALI",
-        "Cleanmax Babra",
-        "RenfraEnergy Trichy",
-        "RENEW-03 Sholapur",
-        "Renew2 Chandwad",
-        "ReNew-4 Patoda",
-        "Clean max Jagalur",
-        "Sembcorp Tuticorin",
-        "Renew-4 Kudligi",
-        "Renew Otha",
-        "Cleanmax Honavad",
-        "Blueleaf Agar",
-        "JSW_Sandur",
-        "India_Hero_Doni"
-
+        "CleanMax -Gujarat (*Den-1.142)","Renew-4 -Kudligi- KA (*Den-1.076)","Renew-4-Otha - GJ (*Den-1.153)",
+        "Renew -Pithalur-GJ  (*Den-1.153)","CleanMax-Jagalur-KA (*Den-1.070)","Fourthpartner-Ottapidaram-TN  (*Den-1.145)",
+        "Sembcorp Tuticorin-TN  (*Den-1.145)","AMGPEL Kurnool	JSW Sandur KA","Fourthpartner Kudligi KA","Ayana Amreli GJ",
+        "Sprng Mulanur TN (1.125Kg/m3)","ACME Shapur GJ (1.136Kg/m3)","Cleanmax Honavad KA (1.105Kg/m3)","Renfra trichy TN","NSL_AP(1.089 Kg/m3)"
     ]
 }
 
@@ -1348,7 +1319,7 @@ with tab_dashboard:
 
                         temp.columns = [
                             "WindSpeed",
-                            "RefPower"
+                            "Power"
                         ]
 
                         temp["WindSpeed"] = pd.to_numeric(
@@ -1376,7 +1347,7 @@ with tab_dashboard:
                         ]
 
                         temp = temp[
-                            temp["RefPower"] >= 0
+                            temp["Power"] >= 0
                         ]
 
 
@@ -1454,7 +1425,7 @@ Reference Power
 or
 
 WindSpeed
-RefPower
+Power
 
 or
 
@@ -1546,14 +1517,14 @@ Theoretical Power
         ref_power = np.interp(
             wind_bins,
             ref["WindSpeed"].values,
-            ref["RefPower"].values
+            ref["Power"].values
         )
 
 
         ref_curve = pd.DataFrame(
             {
                 "WindBin": wind_bins,
-                "RefPower": ref_power
+                "Power": _power
             }
         )
 
@@ -1815,7 +1786,7 @@ Theoretical Power
         fig.add_trace(
             go.Scatter(
                 x=merged["WindBin"],
-                y=merged["RefPower"],
+                y=merged["Power"],
                 mode="lines",
                 line=dict(
                     dash="dash",
