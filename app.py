@@ -213,7 +213,7 @@ SITE_CAPACITY = load_site_capacity()
 # =========================
 # TABS
 # =========================
-tab_dashboard, tab_admin = st.tabs(["Dashboard", "Site Add-on / Admin"])
+tab_dashboard, tab_admin = st.tabs(["Dashboard", "Site Add-on"])
 
 # ==========================================================
 # TAB: ADMIN
@@ -602,7 +602,7 @@ with tab_dashboard:
         dev = round(dev, 2)
 
         if dev < -72:
-            return f"Dev: {dev}% → Extreme issue (Data unreliable)"
+            return f"Dev: {dev}% → Extreme issue (The Data unreliable)"
         elif dev < -10:
             return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
         elif dev < -2:
