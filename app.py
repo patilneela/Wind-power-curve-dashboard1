@@ -185,7 +185,9 @@ DEFAULT_SITE_CAPACITY = {
 
     "Renfra trichy TN": 3.3,
 
-    "NSL_AP (1.089 Kg/m3)": 3.3
+    "NSL_AP (1.089 Kg/m3)": 3.3,
+
+    "Renew Gadag KA": 3.3
 }
 
 
