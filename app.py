@@ -6,6 +6,7 @@ from scipy.signal import savgol_filter
 from datetime import timedelta
 import os
 import io
+import re
 
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.pdfgen import canvas
@@ -15,6 +16,7 @@ from reportlab.lib.utils import ImageReader
 # =========================================================
 # PAGE CONFIG
 # =========================================================
+
 st.set_page_config(
     page_title="Power Curve Analytics Report",
     layout="wide"
@@ -24,6 +26,7 @@ st.set_page_config(
 # =========================================================
 # SIMPLE LOGIN
 # =========================================================
+
 def login_gate():
 
     if "authenticated" not in st.session_state:
@@ -76,7 +79,11 @@ login_gate()
 # =========================================================
 # LOGOUT
 # =========================================================
-if st.sidebar.button("Logout", key="logout_btn"):
+
+if st.sidebar.button(
+    "Logout",
+    key="logout_btn"
+):
 
     st.session_state.authenticated = False
     st.rerun()
@@ -85,6 +92,7 @@ if st.sidebar.button("Logout", key="logout_btn"):
 # =========================================================
 # KALEIDO CHECK
 # =========================================================
+
 try:
 
     import kaleido  # noqa: F401
@@ -100,13 +108,17 @@ except Exception:
 # PATHS
 # =========================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
-# ---------------------------------------------------------
-# CHANGE ONLY THIS FILE NAME IF YOUR NEW REFERENCE FILE
-# HAS A DIFFERENT NAME
-# ---------------------------------------------------------
-REFERENCE_FILE_NAME = "All Sites Specific Power Curve data_ENV.xlsx"
+# =========================================================
+# CHANGE ONLY THIS FILE NAME IF REQUIRED
+# =========================================================
+
+REFERENCE_FILE_NAME = (
+    "All Sites Specific Power Curve data_ENV.xlsx"
+)
 
 REF_FILE_PATH = os.path.join(
     BASE_DIR,
@@ -130,91 +142,245 @@ SITE_MASTER_CSV = os.path.join(
 
 BIN_SIZE = 0.5
 
+MAX_REFERENCE_WIND = 30
+
+REFERENCE_START_WIND = 3
+
+REFERENCE_END_WIND = 25
+
 
 # =========================================================
-# SITE CAPACITY FALLBACK
+# DEFAULT SITE CAPACITY
 # =========================================================
 
 DEFAULT_SITE_CAPACITY = {
 
-    site: 3.3
+    "CleanMax -Gujarat (*Den-1.142)": 3.3,
 
-    for site in [
+    "Renew-4 -Kudligi- KA (*Den-1.076)": 3.3,
 
-        "CleanMax -Gujarat (*Den-1.142)","Renew-4 -Kudligi- KA (*Den-1.076)","Renew-4-Otha - GJ (*Den-1.153)",
-        "Renew -Pithalur-GJ  (*Den-1.153)","CleanMax-Jagalur-KA (*Den-1.070)","Fourthpartner-Ottapidaram-TN  (*Den-1.145)",
-        "Sembcorp Tuticorin-TN  (*Den-1.145)","AMGPEL Kurnool	JSW Sandur KA","Fourthpartner Kudligi KA","Ayana Amreli GJ",
-        "Sprng Mulanur TN (1.125Kg/m3)","ACME Shapur GJ (1.136Kg/m3)","Cleanmax Honavad KA (1.105Kg/m3)","Renfra trichy TN","NSL_AP(1.089 Kg/m3)"
-    ]
+    "Renew-4-Otha - GJ (*Den-1.153)": 3.3,
+
+    "Renew -Pithalur-GJ  (*Den-1.153)": 3.3,
+
+    "CleanMax-Jagalur-KA (*Den-1.070)": 3.3,
+
+    "Fourthpartner-Ottapidaram-TN  (*Den-1.145)": 3.3,
+
+    "Sembcorp Tuticorin-TN  (*Den-1.145)": 3.3,
+
+    "AMGPEL Kurnool": 3.3,
+
+    "JSW Sandur KA": 3.3,
+
+    "Fourthpartner Kudligi KA": 3.3,
+
+    "Ayana Amreli GJ": 3.3,
+
+    "Sprng Mulanur TN (1.125Kg/m3)": 3.3,
+
+    "ACME Shapur GJ (1.136Kg/m3)": 3.3,
+
+    "Cleanmax Honavad KA (1.105Kg/m3)": 3.3,
+
+    "Renfra trichy TN": 3.3,
+
+    "NSL_AP (1.089 Kg/m3)": 3.3
 }
 
 
 # =========================================================
-# HELPERS
+# TEXT NORMALIZATION
+# =========================================================
+
+def normalize_text(value):
+
+    if value is None:
+        return ""
+
+    try:
+
+        if pd.isna(value):
+            return ""
+
+    except Exception:
+
+        pass
+
+    text = str(value)
+
+    # Replace non-breaking spaces
+    text = text.replace("\xa0", " ")
+
+    # Replace line breaks/tabs
+    text = text.replace("\n", " ")
+    text = text.replace("\r", " ")
+    text = text.replace("\t", " ")
+
+    # Normalize multiple spaces
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip().lower()
+
+
+def site_names_match(
+    requested_site,
+    reference_site
+):
+
+    a = normalize_text(
+        requested_site
+    )
+
+    b = normalize_text(
+        reference_site
+    )
+
+    if not a or not b:
+        return False
+
+    # Exact normalized match
+    if a == b:
+        return True
+
+    # Remove common formatting differences
+    a2 = re.sub(
+        r"[\s\-_]+",
+        "",
+        a
+    )
+
+    b2 = re.sub(
+        r"[\s\-_]+",
+        "",
+        b
+    )
+
+    if a2 == b2:
+        return True
+
+    # One contains the other
+    if a2 in b2 or b2 in a2:
+        return True
+
+    return False
+
+
+# =========================================================
+# SITE MASTER PATH
 # =========================================================
 
 def get_site_master_path():
 
-    if os.path.exists(SITE_MASTER_XLSX):
+    if os.path.exists(
+        SITE_MASTER_XLSX
+    ):
+
         return SITE_MASTER_XLSX
 
-    if os.path.exists(SITE_MASTER_CSV):
+    if os.path.exists(
+        SITE_MASTER_CSV
+    ):
+
         return SITE_MASTER_CSV
 
     return None
 
+
+# =========================================================
+# DATE PRESET
+# =========================================================
 
 def compute_preset_range(
     preset: str,
     today_ts: pd.Timestamp
 ):
 
-    today_date = today_ts.normalize().date()
+    today_date = (
+        today_ts
+        .normalize()
+        .date()
+    )
 
     if preset == "Today":
 
-        return today_date, today_date
+        return (
+            today_date,
+            today_date
+        )
 
     if preset == "This Week":
 
         monday = (
             today_date
-            - timedelta(days=today_ts.weekday())
+            - timedelta(
+                days=today_ts.weekday()
+            )
         )
 
-        return monday, today_date
+        return (
+            monday,
+            today_date
+        )
 
     if preset == "Last Week":
 
         this_monday = (
             today_date
-            - timedelta(days=today_ts.weekday())
+            - timedelta(
+                days=today_ts.weekday()
+            )
         )
 
-        start = this_monday - timedelta(days=7)
+        start = (
+            this_monday
+            - timedelta(days=7)
+        )
 
-        end = this_monday - timedelta(days=1)
+        end = (
+            this_monday
+            - timedelta(days=1)
+        )
 
-        return start, end
+        return (
+            start,
+            end
+        )
 
     if preset == "This Month":
 
-        start = today_date.replace(day=1)
+        start = today_date.replace(
+            day=1
+        )
 
-        return start, today_date
+        return (
+            start,
+            today_date
+        )
 
     if preset == "Last Month":
 
-        first_this_month = today_date.replace(day=1)
+        first_this_month = (
+            today_date.replace(day=1)
+        )
 
         last_month_end = (
             first_this_month
             - timedelta(days=1)
         )
 
-        start = last_month_end.replace(day=1)
+        start = last_month_end.replace(
+            day=1
+        )
 
-        return start, last_month_end
+        return (
+            start,
+            last_month_end
+        )
 
     return None
 
@@ -228,11 +394,15 @@ logo_path = os.path.join(
     "Envision.png"
 )
 
-col1, col2, col3 = st.columns([1, 2, 1])
+col1, col2, col3 = st.columns(
+    [1, 2, 1]
+)
 
 with col2:
 
-    if os.path.exists(logo_path):
+    if os.path.exists(
+        logo_path
+    ):
 
         st.image(
             logo_path,
@@ -268,13 +438,19 @@ def load_site_capacity():
 
     try:
 
-        if path.lower().endswith(".csv"):
+        if path.lower().endswith(
+            ".csv"
+        ):
 
-            sm = pd.read_csv(path)
+            sm = pd.read_csv(
+                path
+            )
 
         else:
 
-            sm = pd.read_excel(path)
+            sm = pd.read_excel(
+                path
+            )
 
         sm.columns = [
             str(c).strip()
@@ -286,7 +462,11 @@ def load_site_capacity():
 
         for c in sm.columns:
 
-            c_lower = c.lower()
+            c_lower = (
+                str(c)
+                .strip()
+                .lower()
+            )
 
             if c_lower in [
                 "site",
@@ -307,7 +487,10 @@ def load_site_capacity():
 
                 cap_col = c
 
-        if site_col is None or cap_col is None:
+        if (
+            site_col is None
+            or cap_col is None
+        ):
 
             st.warning(
                 "Site Master columns not recognized. "
@@ -317,7 +500,10 @@ def load_site_capacity():
             return capacity
 
         sm = sm[
-            [site_col, cap_col]
+            [
+                site_col,
+                cap_col
+            ]
         ].dropna()
 
         sm[site_col] = (
@@ -350,7 +536,9 @@ def load_site_capacity():
             "Using default site list."
         )
 
-        st.code(str(e))
+        st.code(
+            str(e)
+        )
 
         return capacity
 
@@ -395,7 +583,7 @@ with tab_admin:
     ):
 
         st.success(
-            f"Reference file found: "
+            "Reference file found: "
             f"`{os.path.basename(REF_FILE_PATH)}`"
         )
 
@@ -521,12 +709,14 @@ with tab_admin:
         "## 2) Site Master"
     )
 
-    existing_sm = get_site_master_path()
+    existing_sm = (
+        get_site_master_path()
+    )
 
     if existing_sm:
 
         st.success(
-            f"Site Master found: "
+            "Site Master found: "
             f"`{os.path.basename(existing_sm)}`"
         )
 
@@ -664,11 +854,13 @@ with tab_admin:
             else:
 
                 st.info(
-                    "No Site Master file to delete."
+                    "No Site Master to delete."
                 )
 
 
-    existing_sm = get_site_master_path()
+    existing_sm = (
+        get_site_master_path()
+    )
 
     if existing_sm:
 
@@ -737,6 +929,10 @@ with tab_dashboard:
         st.stop()
 
 
+    # =====================================================
+    # REFERENCE FILE CHECK
+    # =====================================================
+
     if not os.path.exists(
         REF_FILE_PATH
     ):
@@ -755,7 +951,9 @@ with tab_dashboard:
 
     site = st.sidebar.selectbox(
         "Select Site",
-        list(SITE_CAPACITY.keys()),
+        list(
+            SITE_CAPACITY.keys()
+        ),
         key="site_select"
     )
 
@@ -798,6 +996,10 @@ with tab_dashboard:
         )
 
 
+        # -------------------------------------------------
+        # TURBINE NAME
+        # -------------------------------------------------
+
         if "Name" not in df_local.columns:
 
             raise ValueError(
@@ -807,13 +1009,30 @@ with tab_dashboard:
 
 
         # -------------------------------------------------
-        # FIND WIND COLUMN
+        # WIND COLUMN
         # -------------------------------------------------
 
         wind_candidates = [
-            c for c in df_local.columns
-            if "wind" in c.lower()
+            c
+            for c in df_local.columns
+            if (
+                "wind" in c.lower()
+                and (
+                    "speed" in c.lower()
+                    or "ws" in c.lower()
+                    or "ave" in c.lower()
+                    or "avg" in c.lower()
+                )
+            )
         ]
+
+        if not wind_candidates:
+
+            wind_candidates = [
+                c
+                for c in df_local.columns
+                if "wind" in c.lower()
+            ]
 
         if not wind_candidates:
 
@@ -825,11 +1044,12 @@ with tab_dashboard:
 
 
         # -------------------------------------------------
-        # FIND POWER COLUMN
+        # POWER COLUMN
         # -------------------------------------------------
 
         power_candidates = [
-            c for c in df_local.columns
+            c
+            for c in df_local.columns
             if (
                 "power" in c.lower()
                 or "active" in c.lower()
@@ -846,11 +1066,12 @@ with tab_dashboard:
 
 
         # -------------------------------------------------
-        # FIND TIME COLUMN
+        # TIME COLUMN
         # -------------------------------------------------
 
         time_candidates = [
-            c for c in df_local.columns
+            c
+            for c in df_local.columns
             if (
                 "time" in c.lower()
                 or "date" in c.lower()
@@ -867,11 +1088,12 @@ with tab_dashboard:
 
 
         # -------------------------------------------------
-        # FIND PITCH COLUMN
+        # PITCH COLUMN
         # -------------------------------------------------
 
         pitch_candidates = [
-            c for c in df_local.columns
+            c
+            for c in df_local.columns
             if "pitch" in c.lower()
         ]
 
@@ -886,8 +1108,6 @@ with tab_dashboard:
 
         else:
 
-            # If pitch is not available,
-            # create a neutral pitch column.
             pitch_col = "_Pitch_Default"
 
             df_local[pitch_col] = 0.0
@@ -1003,14 +1223,20 @@ with tab_dashboard:
     DEFAULT_END = base_date
 
 
-    if "manual_start_date" not in st.session_state:
+    if (
+        "manual_start_date"
+        not in st.session_state
+    ):
 
         st.session_state.manual_start_date = (
             DEFAULT_START
         )
 
 
-    if "manual_end_date" not in st.session_state:
+    if (
+        "manual_end_date"
+        not in st.session_state
+    ):
 
         st.session_state.manual_end_date = (
             DEFAULT_END
@@ -1159,17 +1385,32 @@ with tab_dashboard:
     def load_reference(site_name):
 
         """
-        Automatically detects the reference Excel structure.
+        NEW REFERENCE EXCEL FORMAT
 
-        It looks for:
-        1. Site name
-        2. Wind Speed column
-        3. Power / Reference Power column
+        Example:
 
-        This avoids the old fixed-position logic:
-            c - 1
-            c + 3
+        Row 1:
+        Wind Speed [m/s] | Power [kW] | Power [kW] | ...
+
+        Row 2:
+        blank              | Site A     | Site B     | ...
+
+        Row 3 onward:
+        3.0                | 7          | 9          | ...
+        3.5                | 86         | 66         | ...
+        4.0                | 222        | 191        | ...
+        ...
+
+        This function finds the column corresponding
+        to the selected site and uses:
+
+            Column A = Wind Speed
+            Selected site column = Power
         """
+
+        # -------------------------------------------------
+        # OPEN EXCEL
+        # -------------------------------------------------
 
         try:
 
@@ -1180,11 +1421,12 @@ with tab_dashboard:
         except Exception as e:
 
             raise ValueError(
-                f"Unable to open reference Excel: {e}"
+                "Unable to open reference Excel: "
+                f"{e}"
             )
 
 
-        all_candidates = []
+        site_candidates = []
 
 
         # =================================================
@@ -1197,7 +1439,8 @@ with tab_dashboard:
 
                 raw = pd.read_excel(
                     REF_FILE_PATH,
-                    sheet_name=sheet
+                    sheet_name=sheet,
+                    header=None
                 )
 
             except Exception:
@@ -1211,316 +1454,517 @@ with tab_dashboard:
 
 
             # -------------------------------------------------
-            # CLEAN COLUMN NAMES
+            # REMOVE COMPLETELY EMPTY ROWS/COLUMNS
             # -------------------------------------------------
 
-            raw.columns = [
-                str(c).strip()
-                for c in raw.columns
-            ]
+            raw = raw.dropna(
+                axis=0,
+                how="all"
+            )
+
+            raw = raw.dropna(
+                axis=1,
+                how="all"
+            )
+
+            if raw.empty:
+
+                continue
 
 
             # -------------------------------------------------
-            # SEARCH FOR SITE NAME
+            # SEARCH FIRST FEW ROWS FOR SITE NAMES
             # -------------------------------------------------
 
-            site_found = False
+            max_header_rows = min(
+                10,
+                len(raw)
+            )
 
-            for col in raw.columns:
 
-                try:
+            for col_index in range(
+                1,
+                len(raw.columns)
+            ):
 
-                    mask = (
-                        raw[col]
-                        .astype(str)
-                        .str.strip()
-                        .str.lower()
-                        .str.contains(
-                            str(site_name).lower(),
-                            regex=False,
-                            na=False
-                        )
+                possible_site_names = []
+
+
+                for row_index in range(
+                    max_header_rows
+                ):
+
+                    value = raw.iloc[
+                        row_index,
+                        col_index
+                    ]
+
+                    text = normalize_text(
+                        value
                     )
 
-                    if mask.any():
-
-                        site_found = True
-                        break
-
-                except Exception:
-
-                    pass
-
-
-            # =================================================
-            # IDENTIFY WIND COLUMN
-            # =================================================
-
-            wind_candidates = []
-
-            for col in raw.columns:
-
-                c = str(col).lower()
-
-                if any(
-                    word in c
-                    for word in [
-                        "wind speed",
-                        "windspeed",
-                        "wind_speed",
-                        "wind"
-                    ]
-                ):
-
-                    wind_candidates.append(col)
-
-
-            # =================================================
-            # IDENTIFY POWER COLUMN
-            # =================================================
-
-            power_candidates = []
-
-            for col in raw.columns:
-
-                c = str(col).lower()
-
-                if any(
-                    word in c
-                    for word in [
-                        "reference power",
-                        "ref power",
-                        "refpower",
-                        "theoretical power",
-                        "theoreticalpower",
-                        "power"
-                    ]
-                ):
-
-                    power_candidates.append(col)
-
-
-            # -------------------------------------------------
-            # SCORE POSSIBLE COLUMN PAIRS
-            # -------------------------------------------------
-
-            for wind_col_ref in wind_candidates:
-
-                for power_col_ref in power_candidates:
-
-                    try:
-
-                        temp = raw[
-                            [
-                                wind_col_ref,
-                                power_col_ref
-                            ]
-                        ].copy()
-
-                        temp.columns = [
-                            "WindSpeed",
-                            "Power"
-                        ]
-
-                        temp["WindSpeed"] = pd.to_numeric(
-                            temp["WindSpeed"],
-                            errors="coerce"
-                        )
-
-                        temp["RefPower"] = pd.to_numeric(
-                            temp["RefPower"],
-                            errors="coerce"
-                        )
-
-                        temp = temp.dropna()
-
-
-                        # Need enough usable data
-                        if len(temp) < 5:
-
-                            continue
-
-
-                        # Remove impossible values
-                        temp = temp[
-                            temp["WindSpeed"] >= 0
-                        ]
-
-                        temp = temp[
-                            temp["Power"] >= 0
-                        ]
-
-
-                        if len(temp) < 5:
-
-                            continue
-
-
-                        # -------------------------------------------------
-                        # SCORE
-                        # -------------------------------------------------
-
-                        score = 0
-
-                        if site_found:
-
-                            score += 100
-
-                        if (
-                            "reference"
-                            in str(power_col_ref).lower()
-                        ):
-
-                            score += 30
-
-                        if (
-                            "theoretical"
-                            in str(power_col_ref).lower()
-                        ):
-
-                            score += 30
-
-                        if (
-                            "wind"
-                            in str(wind_col_ref).lower()
-                        ):
-
-                            score += 10
-
-
-                        all_candidates.append(
-                            (
-                                score,
-                                sheet,
-                                wind_col_ref,
-                                power_col_ref,
-                                temp
-                            )
-                        )
-
-                    except Exception:
+                    if not text:
 
                         continue
 
 
+                    # Ignore generic Power headings
+                    if text in [
+                        "power [kw]",
+                        "power",
+                        "power kw",
+                        "reference power",
+                        "ref power",
+                        "theoretical power"
+                    ]:
+
+                        continue
+
+
+                    if (
+                        "power" in text
+                        and "den" not in text
+                        and len(text) < 30
+                    ):
+
+                        continue
+
+
+                    possible_site_names.append(
+                        (
+                            row_index,
+                            str(value).strip()
+                        )
+                    )
+
+
+                # -------------------------------------------------
+                # COMPARE AGAINST SELECTED SITE
+                # -------------------------------------------------
+
+                for (
+                    row_index,
+                    reference_site_name
+                ) in possible_site_names:
+
+                    if site_names_match(
+                        site_name,
+                        reference_site_name
+                    ):
+
+                        site_candidates.append(
+                            {
+                                "sheet": sheet,
+                                "column_index": col_index,
+                                "site_name": reference_site_name,
+                                "site_row": row_index
+                            }
+                        )
+
+
         # =================================================
-        # NO DATA FOUND
+        # SITE NOT FOUND
         # =================================================
 
-        if not all_candidates:
+        if not site_candidates:
+
+            # ---------------------------------------------
+            # Create a useful diagnostic list
+            # ---------------------------------------------
+
+            detected_sites = []
+
+
+            try:
+
+                for sheet in excel_file.sheet_names:
+
+                    raw = pd.read_excel(
+                        REF_FILE_PATH,
+                        sheet_name=sheet,
+                        header=None
+                    )
+
+                    if raw.empty:
+                        continue
+
+                    raw = raw.dropna(
+                        axis=0,
+                        how="all"
+                    )
+
+                    raw = raw.dropna(
+                        axis=1,
+                        how="all"
+                    )
+
+                    for col_index in range(
+                        1,
+                        len(raw.columns)
+                    ):
+
+                        for row_index in range(
+                            min(10, len(raw))
+                        ):
+
+                            value = raw.iloc[
+                                row_index,
+                                col_index
+                            ]
+
+                            text = normalize_text(
+                                value
+                            )
+
+                            if not text:
+                                continue
+
+                            if (
+                                "power" in text
+                                and len(text) < 30
+                            ):
+                                continue
+
+                            # A possible site name generally
+                            # contains letters and is not numeric.
+                            try:
+
+                                float(text)
+
+                                is_numeric = True
+
+                            except Exception:
+
+                                is_numeric = False
+
+
+                            if not is_numeric:
+
+                                detected_sites.append(
+                                    str(value).strip()
+                                )
+
+            except Exception:
+
+                pass
+
+
+            # Remove duplicates
+            detected_sites = list(
+                dict.fromkeys(
+                    detected_sites
+                )
+            )
+
+
+            message = (
+                "Reference curve could not be detected "
+                f"for site:\n\n{site_name}\n\n"
+                "The new reference Excel format expects:\n\n"
+                "Column A  → Wind Speed [m/s]\n"
+                "Other columns → Power [kW]\n"
+                "A row below the Power heading → Site name\n\n"
+                "Please check the spelling of the site name "
+                "between Site Add-on and the reference Excel."
+            )
+
+
+            if detected_sites:
+
+                message += (
+                    "\n\nDetected site names in reference Excel:\n"
+                )
+
+                for s in detected_sites:
+
+                    message += (
+                        f"\n• {s}"
+                    )
+
 
             raise ValueError(
-                f"""
-Reference curve could not be detected for site:
-
-{site_name}
-
-Please check the new Excel file.
-
-The Excel should contain columns similar to:
-
-WindSpeed
-Power
-"""
+                message
             )
 
 
         # =================================================
-        # SELECT BEST CANDIDATE
+        # SELECT MATCH
         # =================================================
 
-        all_candidates.sort(
-            key=lambda x: x[0],
-            reverse=True
+        selected_candidate = (
+            site_candidates[0]
         )
 
-        (
-            score,
-            sheet,
-            wind_col_ref,
-            power_col_ref,
-            ref
-        ) = all_candidates[0]
 
-
-        # =================================================
-        # CLEAN REFERENCE
-        # =================================================
-
-        ref = ref.sort_values(
-            "WindSpeed"
+        sheet = (
+            selected_candidate["sheet"]
         )
 
-        ref = ref.drop_duplicates(
-            subset=["WindSpeed"]
+        power_column_index = (
+            selected_candidate["column_index"]
+        )
+
+        site_row = (
+            selected_candidate["site_row"]
+        )
+
+        matched_site_name = (
+            selected_candidate["site_name"]
         )
 
 
         # =================================================
-        # LIMIT REFERENCE CURVE
+        # READ SELECTED SHEET
         # =================================================
 
-        ref = ref[
-            (ref["WindSpeed"] >= 0)
-            &
-            (ref["WindSpeed"] <= 30)
-        ]
-
-
-        if len(ref) < 5:
-
-            raise ValueError(
-                "Not enough valid reference data."
-            )
-
-
-        # =================================================
-        # CREATE 0.5 m/s WIND BINS
-        # =================================================
-
-        min_wind = max(
-            3,
-            float(
-                ref["WindSpeed"].min()
-            )
-        )
-
-        max_wind = min(
-            25,
-            float(
-                ref["WindSpeed"].max()
-            )
-        )
-
-
-        wind_bins = np.arange(
-            min_wind,
-            max_wind + BIN_SIZE,
-            BIN_SIZE
+        raw = pd.read_excel(
+            REF_FILE_PATH,
+            sheet_name=sheet,
+            header=None
         )
 
 
         # =================================================
-        # INTERPOLATE
+        # FIND WIND SPEED COLUMN
         # =================================================
 
-        ref_power = np.interp(
-            wind_bins,
-            ref["WindSpeed"].values,
-            ref["Power"].values
-        )
+        wind_column_index = None
 
 
-        ref_curve = pd.DataFrame(
+        for col_index in range(
+            len(raw.columns)
+        ):
+
+            for row_index in range(
+                min(10, len(raw))
+            ):
+
+                value = raw.iloc[
+                    row_index,
+                    col_index
+                ]
+
+                text = normalize_text(
+                    value
+                )
+
+                if (
+                    "wind speed" in text
+                    or "windspeed" in text
+                    or "wind_speed" in text
+                ):
+
+                    wind_column_index = (
+                        col_index
+                    )
+
+                    break
+
+            if wind_column_index is not None:
+
+                break
+
+
+        # -------------------------------------------------
+        # FALLBACK: FIRST COLUMN
+        # -------------------------------------------------
+
+        if wind_column_index is None:
+
+            wind_column_index = 0
+
+
+        # =================================================
+        # EXTRACT WIND + POWER
+        # =================================================
+
+        reference_data = pd.DataFrame(
             {
-                "WindBin": wind_bins,
-                "Power": _power
+                "WindSpeed": raw.iloc[
+                    site_row + 1:,
+                    wind_column_index
+                ],
+
+                "Power": raw.iloc[
+                    site_row + 1:,
+                    power_column_index
+                ]
             }
         )
 
 
         # =================================================
-        # INFO
+        # CONVERT NUMERIC
+        # =================================================
+
+        reference_data["WindSpeed"] = pd.to_numeric(
+            reference_data["WindSpeed"],
+            errors="coerce"
+        )
+
+        reference_data["Power"] = pd.to_numeric(
+            reference_data["Power"],
+            errors="coerce"
+        )
+
+
+        # =================================================
+        # REMOVE INVALID ROWS
+        # =================================================
+
+        reference_data = (
+            reference_data
+            .dropna(
+                subset=[
+                    "WindSpeed",
+                    "Power"
+                ]
+            )
+        )
+
+
+        # =================================================
+        # REMOVE NEGATIVE VALUES
+        # =================================================
+
+        reference_data = reference_data[
+            reference_data["WindSpeed"] >= 0
+        ]
+
+        reference_data = reference_data[
+            reference_data["Power"] >= 0
+        ]
+
+
+        # =================================================
+        # REMOVE DUPLICATE WIND SPEEDS
+        # =================================================
+
+        reference_data = (
+            reference_data
+            .sort_values(
+                "WindSpeed"
+            )
+            .drop_duplicates(
+                subset=[
+                    "WindSpeed"
+                ],
+                keep="first"
+            )
+        )
+
+
+        if len(reference_data) < 5:
+
+            raise ValueError(
+                f"Reference data for site "
+                f"'{matched_site_name}' contains "
+                "fewer than 5 valid Wind Speed / Power rows."
+            )
+
+
+        # =================================================
+        # LIMIT WIND RANGE
+        # =================================================
+
+        reference_data = reference_data[
+            (
+                reference_data["WindSpeed"]
+                <= MAX_REFERENCE_WIND
+            )
+        ]
+
+
+        # =================================================
+        # CREATE STANDARD 0.5 m/s BINS
+        # =================================================
+
+        min_available_wind = (
+            float(
+                reference_data[
+                    "WindSpeed"
+                ].min()
+            )
+        )
+
+        max_available_wind = (
+            float(
+                reference_data[
+                    "WindSpeed"
+                ].max()
+            )
+        )
+
+
+        min_wind = max(
+            REFERENCE_START_WIND,
+            min_available_wind
+        )
+
+        max_wind = min(
+            REFERENCE_END_WIND,
+            max_available_wind
+        )
+
+
+        if max_wind <= min_wind:
+
+            raise ValueError(
+                "Reference wind-speed range is invalid."
+            )
+
+
+        wind_bins = np.arange(
+            min_wind,
+            max_wind + BIN_SIZE / 2,
+            BIN_SIZE
+        )
+
+
+        # =================================================
+        # INTERPOLATE POWER
+        # =================================================
+
+        ref_power = np.interp(
+            wind_bins,
+            reference_data[
+                "WindSpeed"
+            ].values,
+            reference_data[
+                "Power"
+            ].values
+        )
+
+
+        # =================================================
+        # CREATE REFERENCE CURVE
+        # =================================================
+
+        ref_curve = pd.DataFrame(
+            {
+                "WindBin": np.round(
+                    wind_bins,
+                    6
+                ),
+
+                "RefPower": ref_power
+            }
+        )
+
+
+        # =================================================
+        # FINAL VALIDATION
+        # =================================================
+
+        if ref_curve.empty:
+
+            raise ValueError(
+                "Reference curve is empty."
+            )
+
+
+        # =================================================
+        # RETURN
         # =================================================
 
         return ref_curve
@@ -1550,6 +1994,36 @@ Power
 
 
     # =====================================================
+    # SHOW REFERENCE INFORMATION
+    # =====================================================
+
+    with st.expander(
+        "Reference Curve Information"
+    ):
+
+        st.write(
+            f"Selected Site: **{site}**"
+        )
+
+        st.write(
+            f"Reference points: "
+            f"**{len(ref_curve)}**"
+        )
+
+        st.write(
+            f"Wind range: "
+            f"**{ref_curve['WindBin'].min():.1f} "
+            f"to "
+            f"{ref_curve['WindBin'].max():.1f} m/s**"
+        )
+
+        st.dataframe(
+            ref_curve,
+            use_container_width=True
+        )
+
+
+    # =====================================================
     # PROCESS TURBINE
     # =====================================================
 
@@ -1561,7 +2035,7 @@ Power
 
 
         # -------------------------------------------------
-        # FILTER SCADA
+        # SCADA FILTER
         # -------------------------------------------------
 
         df_t = df_t[
@@ -1595,9 +2069,9 @@ Power
         # STANDARD DEVIATION
         # -------------------------------------------------
 
-        std_dev = df_t[
-            power_col
-        ].std()
+        std_dev = (
+            df_t[power_col].std()
+        )
 
 
         # -------------------------------------------------
@@ -1619,7 +2093,9 @@ Power
 
         actual = (
             df_t
-            .groupby("WindBin")
+            .groupby(
+                "WindBin"
+            )
             .agg(
                 AvgPower=(
                     power_col,
@@ -1630,9 +2106,9 @@ Power
         )
 
 
-        # -------------------------------------------------
-        # MERGE WITH REFERENCE
-        # -------------------------------------------------
+        # =================================================
+        # MERGE ACTUAL + REFERENCE
+        # =================================================
 
         merged = ref_curve.merge(
             actual,
@@ -1641,9 +2117,9 @@ Power
         )
 
 
-        # -------------------------------------------------
+        # =================================================
         # SMOOTH ACTUAL
-        # -------------------------------------------------
+        # =================================================
 
         valid = (
             merged["AvgPower"]
@@ -1674,22 +2150,34 @@ Power
 
             if window >= 5:
 
-                merged.loc[
-                    valid,
-                    "AvgPower"
-                ] = savgol_filter(
-                    values,
-                    window,
-                    2
-                )
+                try:
+
+                    smoothed = (
+                        savgol_filter(
+                            values,
+                            window,
+                            2
+                        )
+                    )
+
+                    merged.loc[
+                        valid,
+                        "AvgPower"
+                    ] = smoothed
+
+                except Exception:
+
+                    pass
 
 
-        # -------------------------------------------------
+        # =================================================
         # DEVIATION
-        # -------------------------------------------------
+        # =================================================
 
         merged["Deviation_%"] = np.where(
+
             merged["RefPower"] != 0,
+
             (
                 (
                     merged["AvgPower"]
@@ -1699,9 +2187,14 @@ Power
                 merged["RefPower"]
             )
             * 100,
+
             np.nan
         )
 
+
+        # =================================================
+        # AVERAGE DEVIATION
+        # =================================================
 
         avg_dev = (
             merged["Deviation_%"]
@@ -1730,7 +2223,10 @@ Power
         dev
     ):
 
-        if dev is None or pd.isna(dev):
+        if (
+            dev is None
+            or pd.isna(dev)
+        ):
 
             title_color = "gray"
 
@@ -1750,85 +2246,123 @@ Power
         fig = go.Figure()
 
 
-        # -------------------------------------------------
-        # 1. SCATTER
-        # -------------------------------------------------
+        # =================================================
+        # SCATTER
+        # =================================================
 
         fig.add_trace(
             go.Scatter(
                 x=df_t[wind_col],
                 y=df_t[power_col],
                 mode="markers",
+
                 marker=dict(
                     size=4,
                     opacity=0.35,
                     color="rgba(30, 144, 255, 0.55)"
                 ),
-                name="Scatter points"
+
+                name="SCADA Data"
             )
         )
 
 
-        # -------------------------------------------------
-        # 2. REFERENCE
-        # -------------------------------------------------
+        # =================================================
+        # REFERENCE CURVE
+        # =================================================
 
         fig.add_trace(
             go.Scatter(
                 x=merged["WindBin"],
-                y=merged["Power"],
+                y=merged["RefPower"],
                 mode="lines",
+
                 line=dict(
                     dash="dash",
                     width=3,
                     color="red"
                 ),
+
                 name="Reference"
             )
         )
 
 
-        # -------------------------------------------------
-        # 3. ACTUAL
-        # -------------------------------------------------
+        # =================================================
+        # ACTUAL CURVE
+        # =================================================
 
         fig.add_trace(
             go.Scatter(
                 x=merged["WindBin"],
                 y=merged["AvgPower"],
                 mode="lines+markers",
+
                 line=dict(
                     width=4,
                     color="green"
                 ),
+
                 marker=dict(
                     size=6,
                     color="green"
                 ),
+
                 name="Actual"
             )
         )
 
 
+        # =================================================
+        # LAYOUT
+        # =================================================
+
         fig.update_layout(
 
             title=dict(
+
                 text=(
                     f"{title} "
-                    f"(Dev: {round(dev, 2)}%)"
+                    f"(Dev: "
+                    f"{round(dev, 2)}%)"
                 ),
+
                 font=dict(
                     color=title_color
                 )
             ),
 
-            xaxis_title="Wind Speed",
+            xaxis=dict(
+                title="Wind Speed (m/s)",
+                range=[
+                    2.5,
+                    25
+                ],
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                showline=True
+            ),
 
-            yaxis_title="Power",
+            yaxis=dict(
+                title="Power (kW)",
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                showline=True
+            ),
 
             height=500,
 
-            hovermode="x unified"
+            hovermode="x unified",
+
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0
+            )
         )
 
 
@@ -1841,9 +2375,14 @@ Power
 
     def generate_comment(dev):
 
-        if dev is None or pd.isna(dev):
+        if (
+            dev is None
+            or pd.isna(dev)
+        ):
 
-            return "Data not available"
+            return (
+                "Data not available"
+            )
 
 
         dev = round(
@@ -1913,11 +2452,45 @@ Power
 
 
     # =====================================================
+    # STATUS
+    # =====================================================
+
+    def get_status(dev):
+
+        if dev is None or pd.isna(dev):
+
+            return "Issue"
+
+        if -2 <= dev <= 2:
+
+            return "Normal"
+
+        elif 2 < dev <= 8:
+
+            return "Slight Over"
+
+        elif dev > 8:
+
+            return "High Over"
+
+        elif -10 <= dev < -2:
+
+            return "Under"
+
+        elif dev < -10:
+
+            return "High Under"
+
+        return "Issue"
+
+
+    # =====================================================
     # TURBINE SELECTION
     # =====================================================
 
     turbines = (
         df["Name"]
+        .dropna()
         .unique()
     )
 
@@ -1966,7 +2539,9 @@ Power
 
     for t in turbines_to_show:
 
-        res = process_turbine(t)
+        res = process_turbine(
+            t
+        )
 
         if res is None:
 
@@ -1993,7 +2568,9 @@ Power
         )
 
 
-        with cols[i % 2]:
+        with cols[
+            i % 2
+        ]:
 
             st.plotly_chart(
                 fig,
@@ -2007,15 +2584,30 @@ Power
 
 
             st.code(
-                generate_comment(dev)
+                generate_comment(
+                    dev
+                )
             )
+
+
+            st.caption(
+                f"Power Standard Deviation: "
+                f"{round(std, 2)} kW"
+            )
+
+
+        comment = (
+            generate_comment(
+                dev
+            )
+        )
 
 
         figures.append(
             (
                 t,
                 fig,
-                generate_comment(dev)
+                comment
             )
         )
 
@@ -2024,39 +2616,25 @@ Power
         # STATUS
         # =================================================
 
-        if -2 <= dev <= 2:
-
-            status = "Normal"
-
-        elif 2 < dev <= 8:
-
-            status = "Slight Over"
-
-        elif dev > 8:
-
-            status = "High Over"
-
-        elif -10 <= dev < -2:
-
-            status = "Under"
-
-        elif dev < -10:
-
-            status = "High Under"
-
-        else:
-
-            status = "Issue"
+        status = get_status(
+            dev
+        )
 
 
         results.append(
             {
                 "Turbine": t,
+
                 "Deviation_%": round(
-                    dev,
+                    float(dev),
                     2
-                ),
-                "Status": status
+                )
+                if pd.notna(dev)
+                else np.nan,
+
+                "Status": status,
+
+                "Comment": comment
             }
         )
 
@@ -2083,10 +2661,15 @@ Power
         results_df = (
             results_df
             .sort_values(
-                by="Deviation_%"
+                by="Deviation_%",
+                na_position="last"
             )
         )
 
+
+        # -------------------------------------------------
+        # ROW COLOR
+        # -------------------------------------------------
 
         def color_row(row):
 
@@ -2147,6 +2730,14 @@ Power
         )
 
 
+    else:
+
+        st.info(
+            "No turbine has enough valid data "
+            "for the selected date range."
+        )
+
+
     # =====================================================
     # PDF REPORT
     # =====================================================
@@ -2163,26 +2754,33 @@ Power
         width, height = landscape(A4)
 
 
-        # -------------------------------------------------
+        # =================================================
         # LOGO
-        # -------------------------------------------------
+        # =================================================
 
         if os.path.exists(
             logo_path
         ):
 
-            pdf.drawImage(
-                logo_path,
-                30,
-                height - 80,
-                width=120,
-                height=40
-            )
+            try:
+
+                pdf.drawImage(
+                    logo_path,
+                    30,
+                    height - 80,
+                    width=120,
+                    height=40,
+                    preserveAspectRatio=True
+                )
+
+            except Exception:
+
+                pass
 
 
-        # -------------------------------------------------
+        # =================================================
         # TITLE
-        # -------------------------------------------------
+        # =================================================
 
         pdf.setFont(
             "Helvetica-Bold",
@@ -2265,7 +2863,7 @@ Power
                     pdf.drawString(
                         420,
                         y - 40,
-                        turbine
+                        str(turbine)
                     )
 
 
