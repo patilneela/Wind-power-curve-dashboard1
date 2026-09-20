@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -3501,4 +3500,3 @@ with tab_dashboard:
             use_container_width=True
 
         )
-```
