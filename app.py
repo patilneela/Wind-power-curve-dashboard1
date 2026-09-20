@@ -339,6 +339,20 @@ def compact_site_name(value):
     )
 
 
+
+# ==========================================================
+# TURBINE NAME SORTING
+# ==========================================================
+
+def natural_sort_key(value):
+    """Sort turbine names naturally: ANB-2 before ANB-12."""
+    text = str(value)
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", text)
+    ]
+
+
 # ==========================================================
 # LOGO
 # ==========================================================
@@ -1238,7 +1252,32 @@ with tab_dashboard:
         )
 
         # --------------------------------------------------
-        # DROP INVALID ROWS
+        # CLEAN TURBINE NAMES
+        # --------------------------------------------------
+
+        df_local["Name"] = (
+            df_local["Name"]
+            .astype(str)
+            .str.replace("\\u00a0", " ", regex=False)
+            .str.strip()
+        )
+
+        # IMPORTANT:
+        # Keep the complete turbine list BEFORE removing rows
+        # with invalid Wind/Power/Time values. This prevents
+        # turbines from disappearing from the dashboard merely
+        # because their data is incomplete.
+        all_turbines_local = [
+            x for x in df_local["Name"].dropna().unique()
+            if str(x).strip() and str(x).strip().lower() != "nan"
+        ]
+        all_turbines_local = sorted(
+            set(all_turbines_local),
+            key=natural_sort_key
+        )
+
+        # --------------------------------------------------
+        # DROP INVALID MEASUREMENT ROWS
         # --------------------------------------------------
 
         df_local = df_local.dropna(
@@ -1249,18 +1288,13 @@ with tab_dashboard:
             ]
         )
 
-        df_local["Name"] = (
-            df_local["Name"]
-            .astype(str)
-            .str.strip()
-        )
-
         return (
             df_local,
             wind_col,
             power_col,
             time_col,
-            pitch_col
+            pitch_col,
+            all_turbines_local
         )
 
     # ======================================================
@@ -1278,7 +1312,8 @@ with tab_dashboard:
                 wind_col,
                 power_col,
                 time_col,
-                pitch_col
+                pitch_col,
+                all_turbines
             ) = load_scada(
                 uploaded_file
             )
@@ -1448,9 +1483,11 @@ with tab_dashboard:
     # HEADER
     # ======================================================
 
-    num_turbines = (
-        df["Name"].nunique()
-    )
+    # IMPORTANT:
+    # Use the complete turbine list detected from the SCADA
+    # file, not only turbines that survived the selected date
+    # range or the power-curve filters.
+    num_turbines = len(all_turbines)
 
     capacity_per_turbine = (
         SITE_CAPACITY.get(
@@ -1586,37 +1623,72 @@ with tab_dashboard:
 
     def process_turbine(t):
 
-        df_t = df[
+        # Always start from the currently selected date range.
+        df_t_raw = df[
             df["Name"] == t
         ].copy()
 
+        raw_rows = len(df_t_raw)
+
+        if raw_rows == 0:
+            return {
+                "turbine": t,
+                "df_t": df_t_raw,
+                "raw_rows": 0,
+                "valid_rows": 0,
+                "status": "No Data",
+                "reason": (
+                    "No SCADA rows are available for this turbine "
+                    "in the selected date range."
+                ),
+                "merged": None,
+                "dev": np.nan,
+                "std": np.nan
+            }
+
         # --------------------------------------------------
-        # SCADA FILTER
+        # SAME POWER-CURVE FILTERING LOGIC
         # --------------------------------------------------
 
-        df_t = df_t[
-            (df_t[wind_col] >= 3)
+        df_t = df_t_raw[
+            (df_t_raw[wind_col] >= 3)
             &
-            (df_t[wind_col] <= 25)
+            (df_t_raw[wind_col] <= 25)
             &
-            (df_t[power_col] > 0)
+            (df_t_raw[power_col] > 0)
             &
-            (df_t[pitch_col] >= -5)
+            (df_t_raw[pitch_col] >= -5)
             &
-            (df_t[pitch_col] <= 5)
-        ]
+            (df_t_raw[pitch_col] <= 5)
+        ].copy()
 
-        if len(df_t) < 30:
+        valid_rows = len(df_t)
 
-            return None
+        # Do NOT remove this turbine from the dashboard.
+        # Return a clear data-quality status instead.
+        if valid_rows < 30:
+            return {
+                "turbine": t,
+                "df_t": df_t,
+                "raw_rows": raw_rows,
+                "valid_rows": valid_rows,
+                "status": "Insufficient Data",
+                "reason": (
+                    f"Only {valid_rows} valid SCADA rows remain after "
+                    "the existing wind/power/pitch filters. "
+                    "At least 30 valid rows are required to calculate "
+                    "the power curve."
+                ),
+                "merged": None,
+                "dev": np.nan,
+                "std": np.nan
+            }
 
         # --------------------------------------------------
         # STANDARD DEVIATION
         # --------------------------------------------------
 
-        std_dev = df_t[
-            power_col
-        ].std()
+        std_dev = df_t[power_col].std()
 
         # --------------------------------------------------
         # WIND BIN
@@ -1624,12 +1696,8 @@ with tab_dashboard:
 
         df_t["WindBin"] = (
             np.floor(
-                df_t[wind_col]
-                /
-                BIN_SIZE
-            )
-            *
-            BIN_SIZE
+                df_t[wind_col] / BIN_SIZE
+            ) * BIN_SIZE
         ).round(6)
 
         # --------------------------------------------------
@@ -1638,14 +1706,9 @@ with tab_dashboard:
 
         actual = (
             df_t
-            .groupby(
-                "WindBin"
-            )
+            .groupby("WindBin")
             .agg(
-                AvgPower=(
-                    power_col,
-                    "mean"
-                )
+                AvgPower=(power_col, "mean")
             )
             .reset_index()
         )
@@ -1664,35 +1727,23 @@ with tab_dashboard:
         # SMOOTH ACTUAL CURVE
         # --------------------------------------------------
 
-        valid = (
-            merged[
-                "AvgPower"
-            ].notna()
-        )
+        valid = merged["AvgPower"].notna()
 
         if valid.sum() >= 7:
 
-            values = (
-                merged.loc[
-                    valid,
-                    "AvgPower"
-                ].values
-            )
+            values = merged.loc[
+                valid, "AvgPower"
+            ].values
 
-            window = min(
-                7,
-                len(values)
-            )
+            window = min(7, len(values))
 
             if window % 2 == 0:
-
                 window -= 1
 
             if window >= 5:
 
                 merged.loc[
-                    valid,
-                    "AvgPower"
+                    valid, "AvgPower"
                 ] = savgol_filter(
                     values,
                     window,
@@ -1703,31 +1754,17 @@ with tab_dashboard:
         # DEVIATION
         # --------------------------------------------------
 
-        merged[
-            "Deviation_%"
-        ] = np.where(
-            merged[
-                "RefPower"
-            ] != 0,
-
+        merged["Deviation_%"] = np.where(
+            merged["RefPower"] != 0,
             (
                 (
-                    merged[
-                        "AvgPower"
-                    ]
+                    merged["AvgPower"]
                     -
-                    merged[
-                        "RefPower"
-                    ]
+                    merged["RefPower"]
                 )
                 /
-                merged[
-                    "RefPower"
-                ]
-            )
-            *
-            100,
-
+                merged["RefPower"]
+            ) * 100,
             np.nan
         )
 
@@ -1735,20 +1772,39 @@ with tab_dashboard:
         # AVERAGE DEVIATION
         # --------------------------------------------------
 
-        avg_dev = (
-            merged[
-                "Deviation_%"
-            ].mean(
-                skipna=True
-            )
+        avg_dev = merged["Deviation_%"].mean(
+            skipna=True
         )
 
-        return (
-            df_t,
-            merged,
-            avg_dev,
-            std_dev
-        )
+        if pd.isna(avg_dev):
+            return {
+                "turbine": t,
+                "df_t": df_t,
+                "raw_rows": raw_rows,
+                "valid_rows": valid_rows,
+                "status": "No Curve",
+                "reason": (
+                    "Valid SCADA rows are present, but there are not "
+                    "enough overlapping wind-speed bins with the "
+                    "reference curve to calculate deviation."
+                ),
+                "merged": merged,
+                "dev": np.nan,
+                "std": std_dev
+            }
+
+        return {
+            "turbine": t,
+            "df_t": df_t,
+            "raw_rows": raw_rows,
+            "valid_rows": valid_rows,
+            "status": "Calculated",
+            "reason": "",
+            "merged": merged,
+            "dev": float(avg_dev),
+            "std": std_dev
+        }
+
 
     # ======================================================
     # PLOT GRAPH
@@ -1761,141 +1817,219 @@ with tab_dashboard:
         dev,
         show_deviation=True
     ):
+        """
+        Larger, cleaner Plotly graph designed for the dashboard.
+        Two graphs are displayed per row so wind-speed/power points
+        remain readable while still keeping 6 graphs per page.
+        """
 
-        if (
-            dev is None
-            or
-            pd.isna(dev)
-        ):
-
+        if dev is None or pd.isna(dev):
             title_color = "gray"
-
         elif -2 <= dev <= 2:
-
             title_color = "green"
-
         elif dev < -2:
-
             title_color = "orange"
-
         else:
-
             title_color = "red"
 
         fig = go.Figure()
 
         # --------------------------------------------------
-        # 1. SCATTER
+        # RAW SCATTER
         # --------------------------------------------------
 
         fig.add_trace(
             go.Scatter(
-                x=df_t[
-                    wind_col
-                ],
-                y=df_t[
-                    power_col
-                ],
+                x=df_t[wind_col],
+                y=df_t[power_col],
                 mode="markers",
-
                 marker=dict(
-                    size=4,
-                    opacity=0.35,
-                    color=(
-                        "rgba("
-                        "30, 144, 255, 0.55)"
-                    )
+                    size=4.5,
+                    opacity=0.30
                 ),
-
-                name="Scatter points"
+                name="SCADA Points",
+                hovertemplate=(
+                    "<b>%{x:.2f} m/s</b><br>"
+                    "Power: %{y:.1f} kW"
+                    "<extra>SCADA</extra>"
+                )
             )
         )
 
         # --------------------------------------------------
-        # 2. REFERENCE
+        # REFERENCE
         # --------------------------------------------------
 
         fig.add_trace(
             go.Scatter(
-                x=merged[
-                    "WindBin"
-                ],
-
-                y=merged[
-                    "RefPower"
-                ],
-
+                x=merged["WindBin"],
+                y=merged["RefPower"],
                 mode="lines",
-
                 line=dict(
                     dash="dash",
-                    width=3,
-                    color="red"
+                    width=3
                 ),
-
-                name="Reference"
+                name="Reference",
+                hovertemplate=(
+                    "<b>%{x:.2f} m/s</b><br>"
+                    "Reference: %{y:.1f} kW"
+                    "<extra>Reference</extra>"
+                )
             )
         )
 
         # --------------------------------------------------
-        # 3. ACTUAL
+        # ACTUAL
         # --------------------------------------------------
 
         fig.add_trace(
             go.Scatter(
-                x=merged[
-                    "WindBin"
-                ],
-
-                y=merged[
-                    "AvgPower"
-                ],
-
+                x=merged["WindBin"],
+                y=merged["AvgPower"],
                 mode="lines+markers",
-
                 line=dict(
-                    width=4,
-                    color="green"
+                    width=3
                 ),
-
                 marker=dict(
-                    size=6,
-                    color="green"
+                    size=6
                 ),
-
-                name="Actual"
+                name="Actual",
+                connectgaps=False,
+                hovertemplate=(
+                    "<b>%{x:.2f} m/s</b><br>"
+                    "Actual: %{y:.1f} kW"
+                    "<extra>Actual</extra>"
+                )
             )
         )
 
         # --------------------------------------------------
-        # GRAPH LAYOUT
+        # READABLE AXIS RANGE
         # --------------------------------------------------
 
-        fig.update_layout(
+        x_values = []
 
-            title=dict(
-                text=(
-                    f"{title} "
-                    f"(Dev: {round(dev, 2)}%)"
-                    if show_deviation
-                    else title
-                ),
+        if len(df_t):
+            x_values.extend(
+                pd.to_numeric(
+                    df_t[wind_col],
+                    errors="coerce"
+                ).dropna().tolist()
+            )
 
-                font=dict(
-                    color=title_color
+        if merged is not None and not merged.empty:
+            x_values.extend(
+                pd.to_numeric(
+                    merged["WindBin"],
+                    errors="coerce"
+                ).dropna().tolist()
+            )
+
+        if x_values:
+            x_max = float(max(x_values))
+            x_min = float(min(x_values))
+            x_left = max(2.5, x_min - 0.4)
+            x_right = min(25.5, max(12.0, x_max + 0.8))
+        else:
+            x_left, x_right = 2.5, 12.0
+
+        y_values = []
+
+        for column in ["RefPower", "AvgPower"]:
+            if column in merged.columns:
+                y_values.extend(
+                    pd.to_numeric(
+                        merged[column],
+                        errors="coerce"
+                    ).dropna().tolist()
                 )
+
+        if len(df_t):
+            y_values.extend(
+                pd.to_numeric(
+                    df_t[power_col],
+                    errors="coerce"
+                ).dropna().tolist()
+            )
+
+        if y_values:
+            y_max = float(max(y_values))
+            y_upper = max(1000.0, y_max * 1.10)
+        else:
+            y_upper = 3500.0
+
+        # --------------------------------------------------
+        # TITLE
+        # --------------------------------------------------
+
+        graph_title = (
+            f"{title}  |  Dev: {dev:.2f}%"
+            if show_deviation and dev is not None and not pd.isna(dev)
+            else title
+        )
+
+        fig.update_layout(
+            title=dict(
+                text=graph_title,
+                font=dict(
+                    size=18,
+                    color=title_color
+                ),
+                x=0.02,
+                xanchor="left"
             ),
 
-            xaxis_title="Wind Speed",
+            xaxis=dict(
+                title=dict(
+                    text="Wind Speed (m/s)",
+                    font=dict(size=13)
+                ),
+                tickfont=dict(size=11),
+                range=[x_left, x_right],
+                showgrid=True,
+                zeroline=False,
+                automargin=True
+            ),
 
-            yaxis_title="Power",
+            yaxis=dict(
+                title=dict(
+                    text="Power (kW)",
+                    font=dict(size=13)
+                ),
+                tickfont=dict(size=11),
+                range=[0, y_upper],
+                showgrid=True,
+                zeroline=False,
+                automargin=True
+            ),
 
-            height=500,
+            height=400,
 
-            hovermode="x unified"
+            margin=dict(
+                l=65,
+                r=20,
+                t=65,
+                b=85
+            ),
+
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.20,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=11)
+            ),
+
+            hovermode="x unified",
+
+            plot_bgcolor="white",
+
+            paper_bgcolor="white"
         )
 
         return fig
+
 
     # ======================================================
     # COMMENT
@@ -1903,103 +2037,103 @@ with tab_dashboard:
 
     def generate_comment(dev):
 
-        if (
-            dev is None
-            or
-            pd.isna(dev)
-        ):
+        if dev is None or pd.isna(dev):
+            return "Deviation could not be calculated."
 
-            return (
-                "Data not available"
-            )
-
-        dev = round(
-            float(dev),
-            2
-        )
+        dev = round(float(dev), 2)
 
         if dev < -72:
-
             return (
-                f"Dev: {dev}% → "
-                "Extreme issue "
-                "(The Data unreliable)"
+                f"Dev: {dev}% → Extreme issue "
+                "(data may be unreliable)"
             )
 
         elif dev < -10:
-
             return (
-                f"Dev: {dev}% → "
-                "Severe underperformance "
-                "(Blade/Dust/Yaw issue)"
+                f"Dev: {dev}% → Severe underperformance "
+                "(possible Blade/Dust/Yaw issue)"
             )
 
         elif dev < -2:
-
             return (
-                f"Dev: {dev}% → "
-                "Underperformance "
-                "(Control/availability)"
+                f"Dev: {dev}% → Underperformance "
+                "(possible Control/Availability issue)"
             )
 
         elif dev > 72:
-
             return (
-                f"Dev: {dev}% → "
-                "Abnormal high "
-                "(Sensor/Data issue)"
+                f"Dev: {dev}% → Abnormally high "
+                "(possible Sensor/Data issue)"
             )
 
         elif dev > 8:
-
             return (
-                f"Dev: {dev}% → "
-                "High overperformance"
+                f"Dev: {dev}% → High overperformance"
             )
 
         elif dev > 2:
-
             return (
-                f"Dev: {dev}% → "
-                "Slight overperformance"
+                f"Dev: {dev}% → Slight overperformance"
             )
 
         else:
-
             return (
-                f"Dev: {dev}% → "
-                "Normal performance"
+                f"Dev: {dev}% → Normal performance"
             )
+
+    def status_from_deviation(dev):
+
+        if dev is None or pd.isna(dev):
+            return "No Curve"
+
+        if -2 <= dev <= 2:
+            return "Normal"
+        elif 2 < dev <= 8:
+            return "Slight Over"
+        elif dev > 8:
+            return "High Over"
+        elif -10 <= dev < -2:
+            return "Under"
+        elif dev < -10:
+            return "High Under"
+
+        return "Issue"
 
     # ======================================================
     # MODE
     # ======================================================
 
-    turbines = (
-        df["Name"]
-        .unique()
+    # IMPORTANT:
+    # Use the COMPLETE turbine list from the original SCADA file.
+    # This list is independent of:
+    #   - selected date range
+    #   - wind/power/pitch filters
+    #   - minimum 30-row requirement
+    turbines = sorted(
+        all_turbines,
+        key=natural_sort_key
+    )
+
+    st.sidebar.caption(
+        f"{len(turbines)} turbines detected in uploaded SCADA"
     )
 
     if mode == "Single Turbine":
 
-        selected_turbine = (
-            st.sidebar.selectbox(
-                "Select Turbine",
-                turbines,
-                key="single_turbine"
-            )
+        selected_turbine = st.sidebar.selectbox(
+            "Select Turbine",
+            turbines,
+            key="single_turbine"
         )
 
         turbines_to_show = [selected_turbine]
 
     elif mode == "Compare Turbines":
 
-        turbines_to_show = (
-            st.sidebar.multiselect(
-                "Select Turbines",
-                turbines,
-                key="compare_turbines"
-            )
+        turbines_to_show = st.sidebar.multiselect(
+            "Select Turbines",
+            turbines,
+            key="compare_turbines"
         )
 
     else:
@@ -2010,123 +2144,304 @@ with tab_dashboard:
     # PROCESS ALL SELECTED TURBINES
     # ======================================================
 
-    results = []
     processed = []
+    results = []
 
     for t in turbines_to_show:
 
-        res = process_turbine(t)
+        item = process_turbine(t)
 
-        if res is None:
-            continue
+        dev = item["dev"]
+        status = item["status"]
 
-        df_t, merged, dev, std = res
+        if item["status"] == "Calculated":
 
-        if -2 <= dev <= 2:
-            status = "Normal"
-        elif 2 < dev <= 8:
-            status = "Slight Over"
-        elif dev > 8:
-            status = "High Over"
-        elif -10 <= dev < -2:
-            status = "Under"
-        elif dev < -10:
-            status = "High Under"
+            status = status_from_deviation(dev)
+            comment = generate_comment(dev)
+
         else:
-            status = "Issue"
 
-        comment = generate_comment(dev)
+            comment = item["reason"]
+
+        item["status"] = status
+        item["comment"] = comment
+
+        processed.append(item)
 
         results.append({
             "Turbine": t,
-            "Deviation_%": round(dev, 2),
+            "Valid Rows": item["valid_rows"],
+            "Deviation_%": (
+                round(float(dev), 2)
+                if dev is not None and not pd.isna(dev)
+                else np.nan
+            ),
             "Status": status
         })
 
-        processed.append({
-            "turbine": t,
-            "df_t": df_t,
-            "merged": merged,
-            "dev": dev,
-            "std": std,
-            "comment": comment
-        })
+    # ======================================================
+    # SUMMARY CARDS
+    # ======================================================
+
+    calculated_count = sum(
+        1 for x in processed
+        if x["status"] in [
+            "Normal",
+            "Slight Over",
+            "High Over",
+            "Under",
+            "High Under",
+            "Issue"
+        ]
+    )
+
+    insufficient_count = sum(
+        1 for x in processed
+        if x["status"] == "Insufficient Data"
+    )
+
+    no_data_count = sum(
+        1 for x in processed
+        if x["status"] == "No Data"
+    )
+
+    no_curve_count = sum(
+        1 for x in processed
+        if x["status"] == "No Curve"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        st.metric(
+            "Total Turbines",
+            len(turbines_to_show)
+        )
+
+    with c2:
+        st.metric(
+            "Power Curves",
+            calculated_count
+        )
+
+    with c3:
+        st.metric(
+            "Insufficient Data",
+            insufficient_count
+        )
+
+    with c4:
+        st.metric(
+            "No Data / Curve",
+            no_data_count + no_curve_count
+        )
 
     # ======================================================
-    # DASHBOARD: 6 GRAPHS PER PAGE (3 x 2)
+    # DASHBOARD: 6 READABLE GRAPHS PER PAGE
+    # 2 COLUMNS x 3 ROWS
     # ======================================================
 
     st.subheader("Power Curve Graphs")
 
     if not processed:
-        st.warning("No turbines have enough valid data for the selected filters.")
+
+        st.info(
+            "No turbines selected. Please select at least one turbine."
+        )
+
     else:
+
         GRAPHS_PER_PAGE = 6
-        total_pages = max(1, int(np.ceil(len(processed) / GRAPHS_PER_PAGE)))
+
+        total_pages = max(
+            1,
+            int(
+                np.ceil(
+                    len(processed) /
+                    GRAPHS_PER_PAGE
+                )
+            )
+        )
 
         if total_pages > 1:
+
             page = st.sidebar.number_input(
                 "Graph Page",
                 min_value=1,
                 max_value=total_pages,
                 value=1,
                 step=1,
-                key="graph_page"
+                key=f"graph_page_{site}_{mode}"
             )
+
         else:
+
             page = 1
 
         page = int(page)
-        start_idx = (page - 1) * GRAPHS_PER_PAGE
-        page_items = processed[start_idx:start_idx + GRAPHS_PER_PAGE]
 
-        st.caption(
-            f"Showing graphs {start_idx + 1}-{start_idx + len(page_items)} "
-            f"of {len(processed)} | Page {page} of {total_pages}"
+        start_idx = (
+            page - 1
+        ) * GRAPHS_PER_PAGE
+
+        page_items = processed[
+            start_idx:
+            start_idx + GRAPHS_PER_PAGE
+        ]
+
+        end_idx = (
+            start_idx +
+            len(page_items)
         )
 
-        cols = st.columns(3)
+        st.caption(
+            f"Showing turbines {start_idx + 1}–{end_idx} "
+            f"of {len(processed)}  |  "
+            f"Page {page} of {total_pages}  |  "
+            f"6 graphs per page"
+        )
 
-        for local_i, item in enumerate(page_items):
+        # Two columns makes every graph substantially wider
+        # and easier to read than 3 narrow columns.
+        for row_start in range(
+            0,
+            len(page_items),
+            2
+        ):
 
-            t = item["turbine"]
-            df_t = item["df_t"]
-            merged = item["merged"]
-            dev = item["dev"]
-            comment = item["comment"]
+            row_items = page_items[
+                row_start:
+                row_start + 2
+            ]
 
-            key_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(t))
-            detail_key = f"show_details_{key_name}"
+            cols = st.columns(
+                2,
+                gap="large"
+            )
 
-            with cols[local_i % 3]:
+            for col, item in zip(
+                cols,
+                row_items
+            ):
 
-                show_details = st.checkbox(
-                    "Show deviation & comment",
-                    value=st.session_state.get(detail_key, True),
-                    key=detail_key
+                t = item["turbine"]
+                df_t = item["df_t"]
+                merged = item["merged"]
+                dev = item["dev"]
+                comment = item["comment"]
+
+                safe_key = re.sub(
+                    r"[^a-zA-Z0-9_]",
+                    "_",
+                    str(t)
                 )
 
-                fig = plot_graph(
-                    df_t,
-                    merged,
-                    t,
-                    dev,
-                    show_deviation=show_details
+                detail_key = (
+                    f"show_details_{site}_{safe_key}"
                 )
 
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    key=f"graph_{key_name}_{page}"
-                )
+                with col:
 
-                if show_details:
-                    st.markdown("**Analysis**")
-                    st.code(comment)
+                    with st.container(
+                        border=True
+                    ):
+
+                        show_details = st.checkbox(
+                            "Show deviation & comment",
+                            value=st.session_state.get(
+                                detail_key,
+                                True
+                            ),
+                            key=detail_key
+                        )
+
+                        if (
+                            merged is not None
+                            and
+                            not merged.empty
+                            and
+                            len(df_t) > 0
+                        ):
+
+                            fig = plot_graph(
+                                df_t,
+                                merged,
+                                t,
+                                dev,
+                                show_deviation=show_details
+                            )
+
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                config={
+                                    "displaylogo": False,
+                                    "responsive": True,
+                                    "scrollZoom": True
+                                },
+                                key=(
+                                    f"graph_{site}_{safe_key}_{page}"
+                                )
+                            )
+
+                            if show_details:
+
+                                st.markdown(
+                                    f"**Analysis:** {comment}"
+                                )
+
+                                st.caption(
+                                    f"Valid SCADA rows: "
+                                    f"{item['valid_rows']:,} | "
+                                    f"Standard deviation: "
+                                    f"{item['std']:.2f} kW"
+                                    if pd.notna(item["std"])
+                                    else
+                                    f"Valid SCADA rows: "
+                                    f"{item['valid_rows']:,}"
+                                )
+
+                        else:
+
+                            st.markdown(
+                                f"### {t}"
+                            )
+
+                            if item["status"] == "No Data":
+
+                                st.warning(
+                                    "No SCADA data is available "
+                                    "for this turbine in the selected "
+                                    "date range."
+                                )
+
+                            elif item["status"] == "Insufficient Data":
+
+                                st.warning(
+                                    "Insufficient data for power-curve calculation."
+                                )
+
+                            else:
+
+                                st.warning(
+                                    "Power curve could not be calculated."
+                                )
+
+                            if show_details:
+
+                                st.markdown(
+                                    f"**Analysis:** {comment}"
+                                )
+
+                            st.caption(
+                                f"Raw rows: {item['raw_rows']:,} | "
+                                f"Valid rows: {item['valid_rows']:,}"
+                            )
 
     # ======================================================
     # RANKING TABLE DATA
     # ======================================================
+
 
     results_df = pd.DataFrame(results)
 
@@ -2134,66 +2449,47 @@ with tab_dashboard:
     # RANKING TABLE
     # ======================================================
 
-    st.subheader(
-        "Turbine Ranking"
-    )
+    st.subheader("Turbine Ranking / Data Status")
+
+    results_df = pd.DataFrame(results)
 
     if not results_df.empty:
+
+        results_df["_TurbineSort"] = results_df[
+            "Turbine"
+        ].map(natural_sort_key)
 
         results_df = (
             results_df
             .sort_values(
-                by="Deviation_%"
+                by=["Deviation_%", "_TurbineSort"],
+                na_position="last"
             )
+            .drop(columns=["_TurbineSort"])
         )
 
         def color_row(row):
 
-            if row[
-                "Status"
-            ] == "Normal":
+            status = row["Status"]
 
-                return [
-                    "background-color: #ccffcc"
-                ] * len(row)
-
-            elif row[
-                "Status"
-            ] == "Slight Over":
-
-                return [
-                    "background-color: #66ff66"
-                ] * len(row)
-
-            elif row[
-                "Status"
-            ] == "High Over":
-
-                return [
-                    "background-color: #009933"
-                ] * len(row)
-
-            elif row[
-                "Status"
-            ] == "Under":
-
-                return [
-                    "background-color: #ffcc66"
-                ] * len(row)
-
-            elif row[
-                "Status"
-            ] == "High Under":
-
-                return [
-                    "background-color: #ff6666"
-                ] * len(row)
-
+            if status == "Normal":
+                color = "#ccffcc"
+            elif status == "Slight Over":
+                color = "#b6f5b6"
+            elif status == "High Over":
+                color = "#8fe08f"
+            elif status == "Under":
+                color = "#ffd58a"
+            elif status == "High Under":
+                color = "#ff9999"
+            elif status in ["Insufficient Data", "No Data", "No Curve"]:
+                color = "#e6e6e6"
             else:
+                color = "#f0f0f0"
 
-                return [
-                    "background-color: #cccccc"
-                ] * len(row)
+            return [
+                f"background-color: {color}"
+            ] * len(row)
 
         styled_table = (
             results_df.style
@@ -2201,11 +2497,19 @@ with tab_dashboard:
                 color_row,
                 axis=1
             )
+            .format(
+                {
+                    "Deviation_%": lambda x:
+                    "" if pd.isna(x)
+                    else f"{x:.2f}%"
+                }
+            )
         )
 
         st.dataframe(
             styled_table,
-            use_container_width=True
+            use_container_width=True,
+            hide_index=True
         )
 
     # ======================================================
@@ -2213,74 +2517,123 @@ with tab_dashboard:
     # ======================================================
 
     try:
+
         pdf_buffer = io.BytesIO()
+
         pdf = canvas.Canvas(
             pdf_buffer,
             pagesize=landscape(A4)
         )
+
         width, height = landscape(A4)
 
-        # PDF option: independent from dashboard graph checkboxes.
         include_pdf_details = st.checkbox(
             "Include deviation and comments in PDF",
             value=True,
             key="include_pdf_details"
         )
 
-        if os.path.exists(logo_path):
-            pdf.drawImage(
-                logo_path, 30, height - 80,
-                width=120, height=40,
-                preserveAspectRatio=True, mask='auto'
+        # Only calculated curves can be rendered as graph images.
+        pdf_items = [
+            item for item in processed
+            if (
+                item["merged"] is not None
+                and not item["merged"].empty
+                and len(item["df_t"]) > 0
+                and item["dev"] is not None
+                and not pd.isna(item["dev"])
+            )
+        ]
+
+        if not KALEIDO_AVAILABLE:
+
+            st.warning(
+                "PDF can be downloaded, but graph images require "
+                "Kaleido. Add `kaleido` to requirements.txt."
             )
 
-        pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawString(170, height - 40, "Power Curve Analytics Report")
-        pdf.setFont("Helvetica", 10)
-        pdf.drawString(170, height - 60, f"Site: {site}")
-        pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
+        # --------------------------------------------------
+        # PDF GRAPH PAGES: 2 COLUMNS x 3 ROWS = 6
+        # --------------------------------------------------
 
-        # 6 graphs per PDF page: 3 columns x 2 rows.
-        graph_width = 250
-        graph_height = 145
-        x_positions = [25, 285, 545]
-        y_positions = [height - 315, height - 535]
+        graph_width = 365
+        graph_height = 175
 
-        for idx, item in enumerate(processed):
-            if idx % 6 == 0:
+        x_positions = [25, 410]
+        y_positions = [
+            height - 270,
+            height - 450,
+            height - 630
+        ]
+
+        for idx, item in enumerate(pdf_items):
+
+            slot = idx % 6
+
+            if slot == 0:
+
                 if idx != 0:
                     pdf.showPage()
-                if idx >= 0:
-                    if os.path.exists(logo_path):
-                        pdf.drawImage(
-                            logo_path, 20, height - 55,
-                            width=90, height=30,
-                            preserveAspectRatio=True, mask='auto'
-                        )
-                    pdf.setFont("Helvetica-Bold", 13)
-                    pdf.drawString(125, height - 35, "Power Curve Analytics Report")
-                    pdf.setFont("Helvetica", 8)
-                    pdf.drawString(125, height - 50, f"Site: {site} | {start_day} to {end_day}")
+
+                if os.path.exists(logo_path):
+
+                    pdf.drawImage(
+                        logo_path,
+                        20,
+                        height - 55,
+                        width=90,
+                        height=30,
+                        preserveAspectRatio=True,
+                        mask="auto"
+                    )
+
+                pdf.setFont(
+                    "Helvetica-Bold",
+                    13
+                )
+
+                pdf.drawString(
+                    125,
+                    height - 35,
+                    "Power Curve Analytics Report"
+                )
+
+                pdf.setFont(
+                    "Helvetica",
+                    8
+                )
+
+                pdf.drawString(
+                    125,
+                    height - 50,
+                    f"Site: {site} | "
+                    f"{start_day} to {end_day}"
+                )
 
             if not KALEIDO_AVAILABLE:
                 continue
 
             try:
-                show_details_pdf = include_pdf_details
+
                 pdf_fig = plot_graph(
                     item["df_t"],
                     item["merged"],
                     item["turbine"],
                     item["dev"],
-                    show_deviation=show_details_pdf
+                    show_deviation=include_pdf_details
                 )
 
-                img = pdf_fig.to_image(format="png")
-                img_reader = ImageReader(io.BytesIO(img))
+                img = pdf_fig.to_image(
+                    format="png"
+                )
 
-                slot = idx % 6
-                col = slot % 3
-                row = slot // 3
+                img_reader = ImageReader(
+                    io.BytesIO(img)
+                )
+
+                col = slot % 2
+                row = slot // 2
+
                 x = x_positions[col]
                 y = y_positions[row]
 
@@ -2291,49 +2644,174 @@ with tab_dashboard:
                     width=graph_width,
                     height=graph_height,
                     preserveAspectRatio=True,
-                    anchor='c'
+                    anchor="c"
                 )
-
-                pdf.setFont("Helvetica-Bold", 8)
-                pdf.drawString(x, y - 10, str(item["turbine"])[:38])
 
                 if include_pdf_details:
-                    pdf.setFont("Helvetica", 7)
-                    comment_text = item["comment"][:75]
-                    pdf.drawString(x, y - 20, comment_text)
+
+                    pdf.setFont(
+                        "Helvetica-Bold",
+                        8
+                    )
+
+                    pdf.drawString(
+                        x,
+                        y - 10,
+                        str(item["turbine"])[:45]
+                    )
+
+                    pdf.setFont(
+                        "Helvetica",
+                        7
+                    )
+
+                    pdf.drawString(
+                        x,
+                        y - 20,
+                        str(item["comment"])[:90]
+                    )
 
             except Exception:
+                # Keep the PDF usable even if one Plotly graph
+                # cannot be converted to an image.
                 pass
 
-        # Ranking summary starts on a separate page.
-        pdf.showPage()
-        pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(30, height - 40, "Turbine Ranking Summary")
-        y = height - 80
-        pdf.setFont("Helvetica", 9)
+        # --------------------------------------------------
+        # DATA STATUS / RANKING SUMMARY
+        # --------------------------------------------------
 
-        if not results_df.empty:
-            for _, row in results_df.iterrows():
-                line = (
-                    f"{row['Turbine']} | "
-                    f"{row['Deviation_%']} % | "
-                    f"{row['Status']}"
+        pdf.showPage()
+
+        if os.path.exists(logo_path):
+
+            pdf.drawImage(
+                logo_path,
+                25,
+                height - 65,
+                width=90,
+                height=30,
+                preserveAspectRatio=True,
+                mask="auto"
+            )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            14
+        )
+
+        pdf.drawString(
+            130,
+            height - 40,
+            "Turbine Ranking / Data Status"
+        )
+
+        pdf.setFont(
+            "Helvetica",
+            8
+        )
+
+        pdf.drawString(
+            130,
+            height - 55,
+            f"Site: {site} | "
+            f"Date: {start_day} to {end_day}"
+        )
+
+        y = height - 85
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            8
+        )
+
+        pdf.drawString(
+            30,
+            y,
+            "Turbine"
+        )
+
+        pdf.drawString(
+            180,
+            y,
+            "Valid Rows"
+        )
+
+        pdf.drawString(
+            250,
+            y,
+            "Deviation"
+        )
+
+        pdf.drawString(
+            330,
+            y,
+            "Status"
+        )
+
+        y -= 16
+
+        pdf.setFont(
+            "Helvetica",
+            8
+        )
+
+        for _, row in results_df.iterrows():
+
+            deviation = row["Deviation_%"]
+
+            deviation_text = (
+                ""
+                if pd.isna(deviation)
+                else f"{deviation:.2f}%"
+            )
+
+            line_values = [
+                str(row["Turbine"])[:30],
+                str(row["Valid Rows"]),
+                deviation_text,
+                str(row["Status"])[:25]
+            ]
+
+            pdf.drawString(
+                30,
+                y,
+                line_values[0]
+            )
+
+            pdf.drawString(
+                180,
+                y,
+                line_values[1]
+            )
+
+            pdf.drawString(
+                250,
+                y,
+                line_values[2]
+            )
+
+            pdf.drawString(
+                330,
+                y,
+                line_values[3]
+            )
+
+            y -= 14
+
+            if y < 35:
+
+                pdf.showPage()
+
+                y = height - 45
+
+                pdf.setFont(
+                    "Helvetica",
+                    8
                 )
-                pdf.drawString(40, y, line[:120])
-                y -= 16
-                if y < 40:
-                    pdf.showPage()
-                    y = height - 40
-                    pdf.setFont("Helvetica", 9)
 
         pdf.save()
-        pdf_buffer.seek(0)
 
-        if not KALEIDO_AVAILABLE:
-            st.warning(
-                "PDF download is available, but graph images require Kaleido. "
-                "Add `kaleido` to requirements.txt for graph images in the PDF."
-            )
+        pdf_buffer.seek(0)
 
         st.download_button(
             label="Download Full Dashboard Report (PDF)",
@@ -2343,6 +2821,13 @@ with tab_dashboard:
         )
 
     except Exception as e:
-        st.error("PDF generation failed")
-        st.code(str(e))
+
+        st.error(
+            "PDF generation failed"
+        )
+
+        st.code(
+            str(e)
+        )
+
 
