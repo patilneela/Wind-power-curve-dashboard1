@@ -7,20 +7,27 @@ from datetime import timedelta
 import os
 import io
 
-
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
-# =========================
-# PAGE CONFIG
-# =========================
-st.set_page_config(layout="wide")
 
-# =========================
-# SIMPLE LOCK (single user)
-# =========================
+# ==========================================================
+# PAGE CONFIG
+# ==========================================================
+
+st.set_page_config(
+    page_title="Power Curve Analytics Report",
+    layout="wide"
+)
+
+
+# ==========================================================
+# LOGIN
+# ==========================================================
+
 def login_gate():
+
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
@@ -30,744 +37,2272 @@ def login_gate():
     st.title("Login Required")
 
     with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
+
+        username = st.text_input(
+            "Username",
+            key="login_username"
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password"
+        )
+
         submitted = st.form_submit_button("Login")
 
     if submitted:
+
         cfg = st.secrets.get("auth", {})
-        ok = (username == cfg.get("username")) and (password == cfg.get("password"))
+
+        ok = (
+            username == cfg.get("username")
+            and
+            password == cfg.get("password")
+        )
 
         if ok:
+
             st.session_state.authenticated = True
             st.rerun()
+
         else:
+
             st.error("Invalid username or password")
 
     st.stop()
 
+
 login_gate()
 
+
+# ==========================================================
+# LOGOUT
+# ==========================================================
+
 if st.sidebar.button("Logout", key="logout_btn"):
+
     st.session_state.authenticated = False
     st.rerun()
 
-# SAFE KALEIDO CHECK
+
+# ==========================================================
+# KALEIDO CHECK
+# ==========================================================
+
 try:
-    import kaleido  # noqa: F401
+
+    import kaleido
+
     KALEIDO_AVAILABLE = True
+
 except Exception:
+
     KALEIDO_AVAILABLE = False
 
-# =========================
-# PATHS
-# =========================
+
+# ==========================================================
+# PATH
+# ==========================================================
+
 BASE_DIR = os.path.dirname(__file__)
-REF_FILE_PATH = os.path.join(BASE_DIR, "reference.xlsx")
-SITE_MASTER_XLSX = os.path.join(BASE_DIR, "site_master.xlsx")
-SITE_MASTER_CSV = os.path.join(BASE_DIR, "site_master.csv")
+
+LOGO_PATH = os.path.join(
+    BASE_DIR,
+    "Envision.png"
+)
+
+SITE_MASTER_XLSX = os.path.join(
+    BASE_DIR,
+    "site_master.xlsx"
+)
+
+SITE_MASTER_CSV = os.path.join(
+    BASE_DIR,
+    "site_master.csv"
+)
 
 BIN_SIZE = 0.5
 
-# =========================
-# HELPERS
-# =========================
+
+# ==========================================================
+# LOGO
+# ==========================================================
+
+col1, col2, col3 = st.columns([1, 2, 1])
+
+with col2:
+
+    if os.path.exists(LOGO_PATH):
+
+        st.image(
+            LOGO_PATH,
+            width=300
+        )
+
+
+# ==========================================================
+# TITLE
+# ==========================================================
+
+st.title("Power Curve Analytics Report")
+
+st.caption(
+    "SCADA Data Driven Power Curve Analysis"
+)
+
+
+# ==========================================================
+# HELPER - SITE MASTER PATH
+# ==========================================================
+
 def get_site_master_path():
+
     if os.path.exists(SITE_MASTER_XLSX):
         return SITE_MASTER_XLSX
+
     if os.path.exists(SITE_MASTER_CSV):
         return SITE_MASTER_CSV
+
     return None
 
-def compute_preset_range(preset: str, today_ts: pd.Timestamp):
-    """
-    Returns (start_day, end_day) as python dates, inclusive.
-    Based on real "today".
-    """
+
+# ==========================================================
+# HELPER - PRESET DATE
+# ==========================================================
+
+def compute_preset_range(
+    preset,
+    today_ts
+):
+
     today_date = today_ts.normalize().date()
 
     if preset == "Today":
+
         return today_date, today_date
 
     if preset == "This Week":
-        monday = today_date - timedelta(days=today_ts.weekday())
+
+        monday = (
+            today_date
+            -
+            timedelta(
+                days=today_ts.weekday()
+            )
+        )
+
         return monday, today_date
 
     if preset == "Last Week":
-        this_monday = today_date - timedelta(days=today_ts.weekday())
+
+        this_monday = (
+            today_date
+            -
+            timedelta(
+                days=today_ts.weekday()
+            )
+        )
+
         start = this_monday - timedelta(days=7)
+
         end = this_monday - timedelta(days=1)
+
         return start, end
 
     if preset == "This Month":
+
         start = today_date.replace(day=1)
+
         return start, today_date
 
     if preset == "Last Month":
+
         first_this_month = today_date.replace(day=1)
-        last_month_end = first_this_month - timedelta(days=1)
+
+        last_month_end = (
+            first_this_month
+            -
+            timedelta(days=1)
+        )
+
         start = last_month_end.replace(day=1)
+
         return start, last_month_end
 
     return None
 
-# =========================
-# LOGO
-# =========================
-logo_path = os.path.join(BASE_DIR, "Envision.png")
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    if os.path.exists(logo_path):
-        st.image(logo_path, width=300)
 
-# =========================
-# TITLE
-# =========================
-st.title("Power Curve Analytics Report")
+# ==========================================================
+# COLUMN DETECTION
+# ==========================================================
 
-# =========================
-# DEFAULT SITE CAPACITY (fallback)
-# =========================
-DEFAULT_SITE_CAPACITY = {
-    site: 3.3 for site in [
-        "CIP Hatalageri",
-        "JSW Tuljapur",
-        "Blupine Sagapara",
-        "Kalavad GJ",
-        "Kalavad_PH2",
-        "AMP_Energy",
-        "Wanki",
-        "CleanMax Motadevaliya",
-        "Ayana Amerli",
-        "Mahadev PH1",
-        "Blupine-I, Ambada-GJ",
-        "ACME Shapar",
-        "FP_Kudligi",
-        "Sprng TN",
-        "Otha Pithalpur-GJ",
-        "AMGEPL,Kurnool AP",
-        "ReNew1_Gadag",
-        "partner Ottapidaum",
-        "Cleanmax SANATHALI",
-        "Cleanmax Babra",
-        "RenfraEnergy Trichy",
-        "RENEW-03 Sholapur",
-        "Renew2 Chandwad",
-        "ReNew-4 Patoda",
-        "Clean max Jagalur",
-        "Sembcorp Tuticorin",
-        "Renew-4 Kudligi",
-        "Renew Otha",
-        "Cleanmax Honavad",
-        "Blueleaf Agar",
-        "JSW_Sandur",
-        "India_Hero_Doni"
-    ]
-}
+def find_column(
+    columns,
+    possible_names
+):
+
+    normalized = {}
+
+    for col in columns:
+
+        clean = (
+            str(col)
+            .strip()
+            .lower()
+            .replace(" ", "")
+            .replace("_", "")
+            .replace("-", "")
+        )
+
+        normalized[clean] = col
+
+    # Exact matching first
+
+    for name in possible_names:
+
+        key = (
+            name
+            .lower()
+            .replace(" ", "")
+            .replace("_", "")
+            .replace("-", "")
+        )
+
+        if key in normalized:
+
+            return normalized[key]
+
+    # Partial matching
+
+    for col in columns:
+
+        low = str(col).strip().lower()
+
+        for name in possible_names:
+
+            if name.lower() in low:
+
+                return col
+
+    return None
+
+
+# ==========================================================
+# DETECT SCADA COLUMNS
+# ==========================================================
+
+def detect_scada_columns(df):
+
+    columns = list(df.columns)
+
+    turbine_col = find_column(
+        columns,
+        [
+            "Name",
+            "Turbine",
+            "TurbineName",
+            "WTG",
+            "WTGName",
+            "WindTurbine",
+            "WindTurbineName"
+        ]
+    )
+
+    site_col = find_column(
+        columns,
+        [
+            "Site",
+            "SiteName",
+            "Plant",
+            "PlantName",
+            "Farm",
+            "FarmName",
+            "WindFarm",
+            "WindFarmName",
+            "Project",
+            "ProjectName",
+            "Location"
+        ]
+    )
+
+    wind_col = find_column(
+        columns,
+        [
+            "WindSpeedAve",
+            "WindSpeed",
+            "WindSpeedAverage",
+            "WindSpeedAvg"
+        ]
+    )
+
+    power_col = find_column(
+        columns,
+        [
+            "ActivePWAve",
+            "ActivePower",
+            "ActivePowerAve",
+            "Power",
+            "PowerAve",
+            "Active"
+        ]
+    )
+
+    time_col = find_column(
+        columns,
+        [
+            "Time",
+            "Timestamp",
+            "DateTime",
+            "Date",
+            "TimeStamp"
+        ]
+    )
+
+    pitch_col = find_column(
+        columns,
+        [
+            "BldPitch1Ave",
+            "Pitch",
+            "PitchAve",
+            "BladePitch",
+            "BladePitch1"
+        ]
+    )
+
+    return (
+        site_col,
+        turbine_col,
+        wind_col,
+        power_col,
+        time_col,
+        pitch_col
+    )
+
+
+# ==========================================================
+# LOAD SITE MASTER
+# ==========================================================
 
 @st.cache_data
-def load_site_capacity():
-    capacity = dict(DEFAULT_SITE_CAPACITY)
+def load_site_master():
+
     path = get_site_master_path()
+
     if path is None:
-        return capacity
+
+        return pd.DataFrame()
 
     try:
+
         if path.lower().endswith(".csv"):
+
             sm = pd.read_csv(path)
+
         else:
+
             sm = pd.read_excel(path)
 
-        sm.columns = [c.strip() for c in sm.columns]
+        sm.columns = [
+            str(c).strip()
+            for c in sm.columns
+        ]
 
-        site_col = None
-        cap_col = None
-        for c in sm.columns:
-            if c.lower() in ["site", "site_name", "sitename", "plant", "project"]:
-                site_col = c
-            if c.lower() in ["capacity_mw", "capacity", "turbine_capacity_mw", "mw"]:
-                cap_col = c
+        return sm
 
-        if site_col is None or cap_col is None:
-            st.warning("site_master file found but columns not recognized. Required: Site + Capacity_MW.")
-            return capacity
+    except Exception:
 
-        sm = sm[[site_col, cap_col]].dropna()
-        sm[site_col] = sm[site_col].astype(str).str.strip()
-        sm[cap_col] = pd.to_numeric(sm[cap_col], errors="coerce")
-        sm = sm.dropna()
-
-        for _, row in sm.iterrows():
-            capacity[row[site_col]] = float(row[cap_col])
-
-        return capacity
-
-    except Exception as e:
-        st.warning("Failed to read site_master. Using default site list.")
-        st.code(str(e))
-        return capacity
-
-SITE_CAPACITY = load_site_capacity()
+        return pd.DataFrame()
 
 
-# =========================
-# TABS
-# =========================
-tab_dashboard, tab_admin = st.tabs(["Dashboard", "Site Add-on"])
+site_master = load_site_master()
+
 
 # ==========================================================
-# TAB: ADMIN
+# SITE MASTER ADMIN
 # ==========================================================
-with tab_admin:
-    st.subheader("Site Add-on")
-    st.divider()
 
-    st.markdown("## 1) Reference Excel (reference.xlsx)")
+with st.sidebar.expander(
+    "Site Master",
+    expanded=False
+):
 
-    if os.path.exists(REF_FILE_PATH):
-        st.success(f"Reference file found: `{os.path.basename(REF_FILE_PATH)}`")
-    else:
-        st.warning("Reference file missing. Upload a reference Excel to enable power curve reference comparison.")
-
-    ref_upload = st.file_uploader(
-        "Upload / Replace Reference Excel (.xlsx)",
-        type=["xlsx"],
-        key="ref_upload"
+    st.write(
+        "Optional: Site Master can be used "
+        "for turbine-to-site mapping and capacity."
     )
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Save / Replace Reference Excel", type="primary"):
-            if ref_upload is None:
-                st.error("Please choose an .xlsx file first.")
-            else:
-                with open(REF_FILE_PATH, "wb") as f:
-                    f.write(ref_upload.getbuffer())
-                st.success("Reference Excel saved/replaced.")
-                st.cache_data.clear()
-                st.rerun()
-
-    with c2:
-        if st.button("Delete Reference Excel"):
-            if os.path.exists(REF_FILE_PATH):
-                os.remove(REF_FILE_PATH)
-                st.success("Reference Excel deleted.")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.info("No reference file to delete.")
-
-    if os.path.exists(REF_FILE_PATH):
-        with st.expander("Preview reference.xlsx (first 30 rows)"):
-            try:
-                tmp = pd.read_excel(REF_FILE_PATH, header=None)
-                st.dataframe(tmp.head(30), use_container_width=True)
-            except Exception as e:
-                st.error("Unable to read reference.xlsx")
-                st.code(str(e))
-
-    st.divider()
-
-    st.markdown("## 2) Site Master (site_master.xlsx / site_master.csv)")
-
-    existing_sm = get_site_master_path()
-    if existing_sm:
-        st.success(f"Site Master found: `{os.path.basename(existing_sm)}`")
-    else:
-        st.info("No Site Master file found. Dashboard will use the hardcoded default site list.")
 
     sm_upload = st.file_uploader(
-        "Upload / Replace Site Master (.xlsx or .csv)",
+        "Upload Site Master",
         type=["xlsx", "csv"],
-        key="sm_upload"
+        key="site_master_upload"
     )
 
-    c3, c4 = st.columns(2)
-    with c3:
-        if st.button("Save / Replace Site Master", type="primary"):
-            if sm_upload is None:
-                st.error("Please choose a .xlsx or .csv file first.")
-            else:
-                ext = os.path.splitext(sm_upload.name)[1].lower()
-                if ext not in [".xlsx", ".csv"]:
-                    st.error("Only .xlsx or .csv supported.")
-                else:
-                    target = os.path.join(BASE_DIR, f"site_master{ext}")
+    if st.button(
+        "Save Site Master",
+        key="save_site_master"
+    ):
 
-                    if target != SITE_MASTER_XLSX and os.path.exists(SITE_MASTER_XLSX):
-                        os.remove(SITE_MASTER_XLSX)
-                    if target != SITE_MASTER_CSV and os.path.exists(SITE_MASTER_CSV):
-                        os.remove(SITE_MASTER_CSV)
+        if sm_upload is None:
 
-                    with open(target, "wb") as f:
-                        f.write(sm_upload.getbuffer())
+            st.warning(
+                "Please select a Site Master file."
+            )
 
-                    st.success(f"Site Master saved as `{os.path.basename(target)}`")
-                    st.cache_data.clear()
-                    st.rerun()
+        else:
 
-    with c4:
-        if st.button("Delete Site Master"):
-            deleted = False
-            if os.path.exists(SITE_MASTER_XLSX):
-                os.remove(SITE_MASTER_XLSX)
-                deleted = True
-            if os.path.exists(SITE_MASTER_CSV):
-                os.remove(SITE_MASTER_CSV)
-                deleted = True
+            extension = os.path.splitext(
+                sm_upload.name
+            )[1].lower()
 
-            if deleted:
-                st.success("Site Master deleted.")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.info("No Site Master file to delete.")
+            target = os.path.join(
+                BASE_DIR,
+                f"site_master{extension}"
+            )
 
-    existing_sm = get_site_master_path()
-    if existing_sm:
-        with st.expander("Preview Site Master"):
-            try:
-                if existing_sm.endswith(".csv"):
-                    sm_df = pd.read_csv(existing_sm)
-                else:
-                    sm_df = pd.read_excel(existing_sm)
-                st.dataframe(sm_df.head(50), use_container_width=True)
-            except Exception as e:
-                st.error("Unable to read Site Master file.")
-                st.code(str(e))
+            # Remove other format
+
+            if extension == ".xlsx":
+
+                if os.path.exists(
+                    SITE_MASTER_CSV
+                ):
+
+                    os.remove(
+                        SITE_MASTER_CSV
+                    )
+
+            if extension == ".csv":
+
+                if os.path.exists(
+                    SITE_MASTER_XLSX
+                ):
+
+                    os.remove(
+                        SITE_MASTER_XLSX
+                    )
+
+            with open(
+                target,
+                "wb"
+            ) as f:
+
+                f.write(
+                    sm_upload.getbuffer()
+                )
+
+            st.success(
+                "Site Master saved successfully."
+            )
+
+            st.cache_data.clear()
+
+            st.rerun()
+
 
 # ==========================================================
-# TAB: DASHBOARD
+# UPLOAD SCADA
 # ==========================================================
-with tab_dashboard:
 
-    st.sidebar.subheader("Upload SCADA File")
-    uploaded_file = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"], key="scada_upload")
+st.sidebar.subheader(
+    "Upload SCADA File"
+)
 
-    if uploaded_file is None:
-        st.warning("Please upload SCADA file")
-        st.stop()
+uploaded_file = st.sidebar.file_uploader(
+    "Upload SCADA CSV",
+    type=["csv"],
+    key="scada_upload"
+)
 
-    if not os.path.exists(REF_FILE_PATH):
-        st.error("Reference Excel is missing. Upload `reference.xlsx` in the Admin tab.")
-        st.stop()
 
-    site = st.sidebar.selectbox("Select Site", list(SITE_CAPACITY.keys()), key="site_select")
-    mode = st.sidebar.radio("Select View", ["Single Turbine", "Compare Turbines", "Show All Turbines"], key="mode_radio")
+if uploaded_file is None:
 
-    # =========================
-    # LOAD SCADA
-    # =========================
-    @st.cache_data(show_spinner=True)
-    def load_scada(file):
-        chunksize = 200000
-        chunks = pd.read_csv(
-            file,
-            chunksize=chunksize,
-            low_memory=False,
-            engine="c"
+    st.info(
+        "Please upload the SCADA CSV file."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# LOAD SCADA
+# ==========================================================
+
+@st.cache_data(show_spinner=True)
+def load_scada(file):
+
+    chunksize = 200000
+
+    chunks = []
+
+    for chunk in pd.read_csv(
+        file,
+        chunksize=chunksize,
+        low_memory=False,
+        engine="c"
+    ):
+
+        chunks.append(chunk)
+
+    df_local = pd.concat(
+        chunks,
+        ignore_index=True
+    )
+
+    df_local.columns = [
+        str(c).strip()
+        for c in df_local.columns
+    ]
+
+    return df_local
+
+
+with st.spinner(
+    "Loading SCADA data..."
+):
+
+    df = load_scada(
+        uploaded_file
+    )
+
+
+if df.empty:
+
+    st.error(
+        "The uploaded SCADA file is empty."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# DETECT COLUMNS
+# ==========================================================
+
+(
+    site_col,
+    turbine_col,
+    wind_col,
+    power_col,
+    time_col,
+    pitch_col
+) = detect_scada_columns(df)
+
+
+# ==========================================================
+# CHECK REQUIRED COLUMNS
+# ==========================================================
+
+missing = []
+
+if site_col is None:
+
+    missing.append(
+        "Site"
+    )
+
+if turbine_col is None:
+
+    missing.append(
+        "Turbine / Name"
+    )
+
+if wind_col is None:
+
+    missing.append(
+        "Wind Speed"
+    )
+
+if power_col is None:
+
+    missing.append(
+        "Active Power"
+    )
+
+if time_col is None:
+
+    missing.append(
+        "Time / Timestamp"
+    )
+
+
+if missing:
+
+    st.error(
+        "Required columns could not be detected."
+    )
+
+    st.write(
+        "Missing:"
+    )
+
+    for item in missing:
+
+        st.write(
+            f"- {item}"
         )
-        df_local = pd.concat(chunks, ignore_index=True)
-        df_local.columns = df_local.columns.str.strip()
 
-        if "Name" not in df_local.columns:
-            st.error("SCADA CSV must contain a 'Name' column for turbine identifier.")
-            st.stop()
-
-        wind_col = [c for c in df_local.columns if "wind" in c.lower()][0]
-        power_col = [c for c in df_local.columns if "power" in c.lower() or "active" in c.lower()][0]
-        time_col = [c for c in df_local.columns if "time" in c.lower()][0]
-        pitch_col = [c for c in df_local.columns if "pitch" in c.lower()][0]
-
-        df_local[time_col] = pd.to_datetime(df_local[time_col], errors="coerce")
-        df_local[wind_col] = pd.to_numeric(df_local[wind_col], errors="coerce")
-        df_local[power_col] = pd.to_numeric(df_local[power_col], errors="coerce")
-        df_local[pitch_col] = pd.to_numeric(df_local[pitch_col], errors="coerce")
-
-        df_local = df_local.dropna(subset=[wind_col, power_col, time_col, pitch_col])
-        df_local["Name"] = df_local["Name"].astype(str).str.strip()
-
-        return df_local, wind_col, power_col, time_col, pitch_col
-
-    with st.spinner("Loading SCADA file..."):
-        df, wind_col, power_col, time_col, pitch_col = load_scada(uploaded_file)
-
-    if df.empty:
-        st.warning("SCADA file has no valid rows after parsing.")
-        st.stop()
-
-    # =========================
-    # DATE FILTER (Single dropdown + Manual calendar)
-    # =========================
-    st.sidebar.markdown("### Date Range")
-
-    max_ts = df[time_col].max()
-    base_date = max_ts.normalize().date() if pd.notna(max_ts) else pd.Timestamp.today().date()
-
-    DEFAULT_START = base_date - timedelta(days=15)
-    DEFAULT_END = base_date
-
-    if "manual_start_date" not in st.session_state:
-        st.session_state.manual_start_date = DEFAULT_START
-    if "manual_end_date" not in st.session_state:
-        st.session_state.manual_end_date = DEFAULT_END
-
-    date_option = st.sidebar.selectbox(
-        "Date Option",
-        ["Clear", "Today", "This Week", "This Month", "Last Week", "Last Month", "Manual (Calendar)"],
-        key="date_option"
+    st.write(
+        "Columns detected in your CSV:"
     )
 
-    if date_option == "Manual (Calendar)":
-        st.sidebar.markdown("#### Manual Selection")
-        start_day = st.sidebar.date_input("Start Date", value=st.session_state.manual_start_date, key="manual_start_date")
-        end_day = st.sidebar.date_input("End Date", value=st.session_state.manual_end_date, key="manual_end_date")
+    st.code(
+        "\n".join(
+            map(str, df.columns)
+        )
+    )
 
-    elif date_option == "Clear":
-        st.session_state.manual_start_date = DEFAULT_START
-        st.session_state.manual_end_date = DEFAULT_END
+    st.stop()
+
+
+# ==========================================================
+# NORMALIZE DATA
+# ==========================================================
+
+df[site_col] = (
+    df[site_col]
+    .astype(str)
+    .str.strip()
+)
+
+df[turbine_col] = (
+    df[turbine_col]
+    .astype(str)
+    .str.strip()
+)
+
+df[wind_col] = pd.to_numeric(
+    df[wind_col],
+    errors="coerce"
+)
+
+df[power_col] = pd.to_numeric(
+    df[power_col],
+    errors="coerce"
+)
+
+df[time_col] = pd.to_datetime(
+    df[time_col],
+    errors="coerce"
+)
+
+if pitch_col is not None:
+
+    df[pitch_col] = pd.to_numeric(
+        df[pitch_col],
+        errors="coerce"
+    )
+
+
+# ==========================================================
+# REMOVE INVALID DATA
+# ==========================================================
+
+required_for_cleaning = [
+    site_col,
+    turbine_col,
+    wind_col,
+    power_col,
+    time_col
+]
+
+df = df.dropna(
+    subset=required_for_cleaning
+)
+
+
+# ==========================================================
+# REMOVE EMPTY SITE / TURBINE
+# ==========================================================
+
+df = df[
+    (df[site_col].str.strip() != "")
+    &
+    (df[turbine_col].str.strip() != "")
+]
+
+
+if df.empty:
+
+    st.error(
+        "No valid SCADA rows are available."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# SITE LIST FROM ACTUAL SCADA DATA
+# ==========================================================
+
+sites = sorted(
+    df[site_col]
+    .dropna()
+    .astype(str)
+    .str.strip()
+    .unique()
+    .tolist()
+)
+
+
+if not sites:
+
+    st.error(
+        "No sites were found in the uploaded SCADA data."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# SELECT SITE
+# ==========================================================
+
+selected_site = st.sidebar.selectbox(
+    "Select Site",
+    sites,
+    key="selected_site"
+)
+
+
+# ==========================================================
+# FILTER DATA BY SITE
+# ==========================================================
+
+site_df = df[
+    df[site_col]
+    .astype(str)
+    .str.strip()
+    ==
+    selected_site
+].copy()
+
+
+if site_df.empty:
+
+    st.warning(
+        f"No SCADA data found for site: {selected_site}"
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# DATE RANGE
+# ==========================================================
+
+st.sidebar.markdown(
+    "### Date Range"
+)
+
+max_ts = site_df[time_col].max()
+
+base_date = (
+    max_ts.normalize().date()
+    if pd.notna(max_ts)
+    else pd.Timestamp.today().date()
+)
+
+DEFAULT_START = (
+    base_date
+    -
+    timedelta(days=15)
+)
+
+DEFAULT_END = base_date
+
+
+if "manual_start_date" not in st.session_state:
+
+    st.session_state.manual_start_date = (
+        DEFAULT_START
+    )
+
+
+if "manual_end_date" not in st.session_state:
+
+    st.session_state.manual_end_date = (
+        DEFAULT_END
+    )
+
+
+date_option = st.sidebar.selectbox(
+    "Date Option",
+    [
+        "Clear",
+        "Today",
+        "This Week",
+        "This Month",
+        "Last Week",
+        "Last Month",
+        "Manual (Calendar)"
+    ],
+    key="date_option"
+)
+
+
+if date_option == "Manual (Calendar)":
+
+    st.sidebar.markdown(
+        "#### Manual Selection"
+    )
+
+    start_day = st.sidebar.date_input(
+        "Start Date",
+        value=st.session_state.manual_start_date,
+        key="manual_start_date"
+    )
+
+    end_day = st.sidebar.date_input(
+        "End Date",
+        value=st.session_state.manual_end_date,
+        key="manual_end_date"
+    )
+
+elif date_option == "Clear":
+
+    start_day = DEFAULT_START
+    end_day = DEFAULT_END
+
+else:
+
+    rng = compute_preset_range(
+        date_option,
+        pd.Timestamp.today()
+    )
+
+    if rng is None:
+
         start_day = DEFAULT_START
         end_day = DEFAULT_END
 
     else:
-        rng = compute_preset_range(date_option, pd.Timestamp.today())
-        if rng is None:
-            start_day, end_day = DEFAULT_START, DEFAULT_END
-        else:
-            start_day, end_day = rng
 
-    # Day-wise filter (ignore time)
-    df["_date_only"] = df[time_col].dt.date
-    df = df[(df["_date_only"] >= start_day) & (df["_date_only"] <= end_day)]
-    df = df.drop(columns=["_date_only"])
+        start_day, end_day = rng
 
-    st.sidebar.caption(f"Applied Range: {start_day} → {end_day}")
 
-    if df.empty:
-        st.warning("No SCADA data available for the selected date range.")
-        st.stop()
+# ==========================================================
+# APPLY DATE FILTER
+# ==========================================================
 
-    # =========================
-    # HEADER
-    # =========================
-    num_turbines = df["Name"].nunique()
-    capacity_per_turbine = SITE_CAPACITY.get(site, 3.3)
-    total_capacity = num_turbines * capacity_per_turbine
+site_df["_date_only"] = (
+    site_df[time_col]
+    .dt.date
+)
 
-    st.subheader(
-        f"{site} | "
-        f"{num_turbines} Turbines | "
-        f"{capacity_per_turbine} MW Each | "
-        f"Total: {round(total_capacity, 2)} MW"
+
+site_df = site_df[
+    (site_df["_date_only"] >= start_day)
+    &
+    (site_df["_date_only"] <= end_day)
+]
+
+
+site_df = site_df.drop(
+    columns=["_date_only"]
+)
+
+
+st.sidebar.caption(
+    f"Applied Range: {start_day} → {end_day}"
+)
+
+
+if site_df.empty:
+
+    st.warning(
+        "No SCADA data is available for the selected site and date range."
     )
-    st.markdown(f"Date Range: {start_day} → {end_day}")
 
-    # =========================
-    # LOAD REFERENCE
-    # =========================
-    @st.cache_data
-    def load_reference(site_name):
-        ref_raw = pd.read_excel(REF_FILE_PATH, header=None)
+    st.stop()
 
-        for r in range(ref_raw.shape[0]):
-            for c in range(ref_raw.shape[1]):
-                cell = str(ref_raw.iloc[r, c])
-                if site_name.lower() in cell.lower():
-                    ref = ref_raw.iloc[r + 2:r + 60, [c - 1, c + 3]].copy()
-                    ref.columns = ["WindSpeed", "RefPower"]
-                    ref = ref.dropna()
 
-                    ref["WindSpeed"] = pd.to_numeric(ref["WindSpeed"], errors="coerce")
-                    ref["RefPower"] = pd.to_numeric(ref["RefPower"], errors="coerce")
-                    ref = ref.dropna()
+# ==========================================================
+# SITE INFORMATION
+# ==========================================================
 
-                    wind_bins = np.arange(4, 15, BIN_SIZE)
-                    ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
+turbines = sorted(
+    site_df[turbine_col]
+    .dropna()
+    .unique()
+    .tolist()
+)
 
-                    return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
+num_turbines = len(turbines)
 
-        st.error("Site not found in reference.xlsx. Upload updated reference in Admin tab.")
-        st.stop()
 
-    ref_curve = load_reference(site)
+# ==========================================================
+# CAPACITY
+# ==========================================================
 
-    # =========================
-    # PROCESS TURBINE
-    # =========================
-    def process_turbine(t):
-        df_t = df[df["Name"] == t].copy()
+capacity_per_turbine = None
+
+if not site_master.empty:
+
+    sm_columns = list(
+        site_master.columns
+    )
+
+    sm_site_col = find_column(
+        sm_columns,
+        [
+            "Site",
+            "SiteName",
+            "Plant",
+            "Project"
+        ]
+    )
+
+    sm_capacity_col = find_column(
+        sm_columns,
+        [
+            "Capacity_MW",
+            "CapacityMW",
+            "TurbineCapacityMW",
+            "MW",
+            "Capacity"
+        ]
+    )
+
+    if (
+        sm_site_col is not None
+        and
+        sm_capacity_col is not None
+    ):
+
+        temp_sm = site_master.copy()
+
+        temp_sm[sm_site_col] = (
+            temp_sm[sm_site_col]
+            .astype(str)
+            .str.strip()
+        )
+
+        matched = temp_sm[
+            temp_sm[sm_site_col]
+            ==
+            selected_site
+        ]
+
+        if not matched.empty:
+
+            capacity_per_turbine = pd.to_numeric(
+                matched.iloc[0][sm_capacity_col],
+                errors="coerce"
+            )
+
+            if pd.isna(
+                capacity_per_turbine
+            ):
+
+                capacity_per_turbine = None
+
+
+if capacity_per_turbine is None:
+
+    capacity_per_turbine = 3.3
+
+
+total_capacity = (
+    num_turbines
+    *
+    float(capacity_per_turbine)
+)
+
+
+# ==========================================================
+# HEADER
+# ==========================================================
+
+st.subheader(
+    f"{selected_site} | "
+    f"{num_turbines} Turbines | "
+    f"{capacity_per_turbine} MW Each | "
+    f"Total: {round(total_capacity, 2)} MW"
+)
+
+st.markdown(
+    f"**Date Range:** {start_day} → {end_day}"
+)
+
+
+# ==========================================================
+# DATA INFORMATION
+# ==========================================================
+
+info1, info2, info3, info4 = st.columns(4)
+
+
+with info1:
+
+    st.metric(
+        "Site",
+        selected_site
+    )
+
+
+with info2:
+
+    st.metric(
+        "Turbines",
+        num_turbines
+    )
+
+
+with info3:
+
+    st.metric(
+        "SCADA Records",
+        f"{len(site_df):,}"
+    )
+
+
+with info4:
+
+    st.metric(
+        "Capacity",
+        f"{round(total_capacity, 2)} MW"
+    )
+
+
+# ==========================================================
+# VIEW MODE
+# ==========================================================
+
+mode = st.sidebar.radio(
+    "Select View",
+    [
+        "Single Turbine",
+        "Compare Turbines",
+        "Show All Turbines"
+    ],
+    key="mode_radio"
+)
+
+
+if mode == "Single Turbine":
+
+    turbines_to_show = [
+        st.sidebar.selectbox(
+            "Select Turbine",
+            turbines,
+            key="single_turbine"
+        )
+    ]
+
+
+elif mode == "Compare Turbines":
+
+    turbines_to_show = st.sidebar.multiselect(
+        "Select Turbines",
+        turbines,
+        key="compare_turbines"
+    )
+
+
+else:
+
+    turbines_to_show = turbines
+
+
+if not turbines_to_show:
+
+    st.info(
+        "Please select at least one turbine."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# PROCESS ACTUAL SCADA POWER CURVE
+# ==========================================================
+
+def process_turbine(
+    turbine_name
+):
+
+    df_t = site_df[
+        site_df[turbine_col]
+        ==
+        turbine_name
+    ].copy()
+
+
+    # ------------------------------------------------------
+    # BASIC FILTERING
+    # ------------------------------------------------------
+
+    df_t = df_t[
+        (df_t[wind_col] >= 3)
+        &
+        (df_t[wind_col] <= 25)
+        &
+        (df_t[power_col] >= 0)
+    ]
+
+
+    # ------------------------------------------------------
+    # PITCH FILTER IF AVAILABLE
+    # ------------------------------------------------------
+
+    if pitch_col is not None:
 
         df_t = df_t[
-            (df_t[wind_col] >= 3) &
-            (df_t[wind_col] <= 25) &
-            (df_t[power_col] > 0) &
-            (df_t[pitch_col] >= -5) &
+            (df_t[pitch_col] >= -5)
+            &
             (df_t[pitch_col] <= 5)
         ]
 
-        if len(df_t) < 30:
-            return None
 
-        std_dev = df_t[power_col].std()
-        df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
+    if len(df_t) < 10:
 
-        actual = df_t.groupby("WindBin").agg(
-            AvgPower=(power_col, "mean")
-        ).reset_index()
+        return None
 
-        merged = ref_curve.merge(actual, on="WindBin", how="left")
-        valid = merged["AvgPower"].notna()
 
-        if valid.sum() >= 7:
-            merged.loc[valid, "AvgPower"] = savgol_filter(
-                merged.loc[valid, "AvgPower"],
+    # ------------------------------------------------------
+    # CREATE WIND BINS
+    # ------------------------------------------------------
+
+    df_t["WindBin"] = (
+        np.floor(
+            df_t[wind_col] / BIN_SIZE
+        )
+        *
+        BIN_SIZE
+    ).round(2)
+
+
+    # ------------------------------------------------------
+    # ACTUAL POWER CURVE
+    # ------------------------------------------------------
+
+    actual = (
+        df_t
+        .groupby("WindBin")
+        .agg(
+            AvgPower=(
+                power_col,
+                "mean"
+            ),
+
+            MinPower=(
+                power_col,
+                "min"
+            ),
+
+            MaxPower=(
+                power_col,
+                "max"
+            ),
+
+            Count=(
+                power_col,
+                "count"
+            ),
+
+            AvgWind=(
+                wind_col,
+                "mean"
+            )
+        )
+        .reset_index()
+    )
+
+
+    actual = actual.sort_values(
+        "WindBin"
+    )
+
+
+    # ------------------------------------------------------
+    # SMOOTH CURVE
+    # ------------------------------------------------------
+
+    actual["SmoothPower"] = (
+        actual["AvgPower"]
+    )
+
+
+    valid_points = (
+        actual["AvgPower"]
+        .notna()
+    )
+
+
+    if valid_points.sum() >= 7:
+
+        try:
+
+            actual.loc[
+                valid_points,
+                "SmoothPower"
+            ] = savgol_filter(
+                actual.loc[
+                    valid_points,
+                    "AvgPower"
+                ].values,
                 7,
                 2
             )
 
-        merged["Deviation_%"] = ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100
-        avg_dev = merged["Deviation_%"].mean(skipna=True)
+        except Exception:
 
-        return df_t, merged, avg_dev, std_dev
+            actual["SmoothPower"] = (
+                actual["AvgPower"]
+            )
 
-    # =========================
-    # PLOT GRAPH (UPDATED COLORS + ORDER)
-    # =========================
-    def plot_graph(df_t, merged, title, dev):
-        title_color = "green" if -2 <= dev <= 2 else ("orange" if dev < -2 else "red")
 
-        fig = go.Figure()
+    # ------------------------------------------------------
+    # STATISTICS
+    # ------------------------------------------------------
 
-        # 1) Scatter first (bottom)
-        fig.add_trace(go.Scatter(
+    average_power = (
+        df_t[power_col]
+        .mean()
+    )
+
+    maximum_power = (
+        df_t[power_col]
+        .max()
+    )
+
+    minimum_power = (
+        df_t[power_col]
+        .min()
+    )
+
+    std_power = (
+        df_t[power_col]
+        .std()
+    )
+
+    average_wind = (
+        df_t[wind_col]
+        .mean()
+    )
+
+
+    return {
+        "raw": df_t,
+        "curve": actual,
+        "average_power": average_power,
+        "maximum_power": maximum_power,
+        "minimum_power": minimum_power,
+        "std_power": std_power,
+        "average_wind": average_wind
+    }
+
+
+# ==========================================================
+# POWER CURVE GRAPH
+# ==========================================================
+
+def plot_power_curve(
+    result,
+    turbine_name
+):
+
+    df_t = result["raw"]
+
+    curve = result["curve"]
+
+
+    fig = go.Figure()
+
+
+    # ------------------------------------------------------
+    # RAW SCADA POINTS
+    # ------------------------------------------------------
+
+    fig.add_trace(
+        go.Scattergl(
             x=df_t[wind_col],
             y=df_t[power_col],
             mode="markers",
+
             marker=dict(
                 size=4,
-                opacity=0.35,
-                color="rgba(30, 144, 255, 0.55)"
+                opacity=0.25
             ),
-            name="Scatter points"
-        ))
 
-        # 2) Reference second (middle)
-        fig.add_trace(go.Scatter(
-            x=merged["WindBin"],
-            y=merged["RefPower"],
-            mode="lines",
-            line=dict(
-                dash="dash",
-                width=3,
-                color="red"
-            ),
-            name="Reference"
-        ))
+            name="SCADA Data",
 
-        # 3) Actual last (top) - GREEN
-        fig.add_trace(go.Scatter(
-            x=merged["WindBin"],
-            y=merged["AvgPower"],
+            hovertemplate=
+            "Wind: %{x:.2f} m/s"
+            "<br>"
+            "Power: %{y:.2f}"
+            "<extra></extra>"
+        )
+    )
+
+
+    # ------------------------------------------------------
+    # ACTUAL BIN AVERAGE
+    # ------------------------------------------------------
+
+    fig.add_trace(
+        go.Scatter(
+            x=curve["WindBin"],
+            y=curve["AvgPower"],
             mode="lines+markers",
+
+            line=dict(
+                width=3
+            ),
+
+            marker=dict(
+                size=6
+            ),
+
+            name="Actual Power Curve",
+
+            hovertemplate=
+            "Wind Bin: %{x:.2f} m/s"
+            "<br>"
+            "Average Power: %{y:.2f}"
+            "<extra></extra>"
+        )
+    )
+
+
+    # ------------------------------------------------------
+    # SMOOTH CURVE
+    # ------------------------------------------------------
+
+    fig.add_trace(
+        go.Scatter(
+            x=curve["WindBin"],
+            y=curve["SmoothPower"],
+            mode="lines",
+
             line=dict(
                 width=4,
-                color="green"
+                dash="solid"
             ),
-            marker=dict(
-                size=6,
-                color="green"
-            ),
-            name="Actual"
-        ))
 
-        fig.update_layout(
-            title=dict(
-                text=f"{title} (Dev: {round(dev, 2)}%)",
-                font=dict(color=title_color)
+            name="Smoothed Power Curve",
+
+            hovertemplate=
+            "Wind: %{x:.2f} m/s"
+            "<br>"
+            "Power: %{y:.2f}"
+            "<extra></extra>"
+        )
+    )
+
+
+    # ------------------------------------------------------
+    # GRAPH LAYOUT
+    # ------------------------------------------------------
+
+    fig.update_layout(
+
+        title=dict(
+            text=f"{turbine_name} - Actual SCADA Power Curve",
+            font=dict(
+                size=20
+            )
+        ),
+
+        xaxis=dict(
+
+            title="Wind Speed (m/s)",
+
+            showgrid=True,
+
+            zeroline=False,
+
+            rangeslider=dict(
+                visible=False
+            )
+        ),
+
+        yaxis=dict(
+
+            title="Active Power",
+
+            showgrid=True,
+
+            zeroline=False
+        ),
+
+        height=550,
+
+        hovermode="closest",
+
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0
+        ),
+
+        margin=dict(
+            l=60,
+            r=30,
+            t=90,
+            b=60
+        )
+    )
+
+
+    return fig
+
+
+# ==========================================================
+# ANALYSIS COMMENT
+# ==========================================================
+
+def generate_comment(
+    result
+):
+
+    if result is None:
+
+        return "Insufficient SCADA data."
+
+
+    avg_power = result[
+        "average_power"
+    ]
+
+    max_power = result[
+        "maximum_power"
+    ]
+
+    avg_wind = result[
+        "average_wind"
+    ]
+
+    return (
+        f"Average Wind Speed: "
+        f"{avg_wind:.2f} m/s\n\n"
+
+        f"Average Power: "
+        f"{avg_power:.2f}\n\n"
+
+        f"Maximum Power: "
+        f"{max_power:.2f}\n\n"
+
+        f"Valid SCADA Records: "
+        f"{len(result['raw']):,}"
+    )
+
+
+# ==========================================================
+# PROCESS ALL SELECTED TURBINES
+# ==========================================================
+
+results = []
+
+figures = []
+
+
+for turbine in turbines_to_show:
+
+    result = process_turbine(
+        turbine
+    )
+
+
+    if result is None:
+
+        continue
+
+
+    curve = result["curve"]
+
+
+    # ------------------------------------------------------
+    # CURVE QUALITY
+    # ------------------------------------------------------
+
+    number_of_bins = len(
+        curve
+    )
+
+
+    max_power = result[
+        "maximum_power"
+    ]
+
+
+    avg_power = result[
+        "average_power"
+    ]
+
+
+    std_power = result[
+        "std_power"
+    ]
+
+
+    results.append({
+
+        "Turbine": turbine,
+
+        "SCADA Records":
+            len(result["raw"]),
+
+        "Wind Bins":
+            number_of_bins,
+
+        "Average Wind":
+            round(
+                result["average_wind"],
+                2
             ),
-            xaxis_title="Wind Speed",
-            yaxis_title="Power",
-            height=500
+
+        "Average Power":
+            round(
+                avg_power,
+                2
+            ),
+
+        "Maximum Power":
+            round(
+                max_power,
+                2
+            ),
+
+        "Power Std Dev":
+            round(
+                std_power,
+                2
+            )
+    })
+
+
+    fig = plot_power_curve(
+        result,
+        turbine
+    )
+
+
+    comment = generate_comment(
+        result
+    )
+
+
+    figures.append(
+        (
+            turbine,
+            fig,
+            comment
+        )
+    )
+
+
+# ==========================================================
+# DISPLAY POWER CURVES
+# ==========================================================
+
+st.divider()
+
+st.subheader(
+    "Actual SCADA Power Curves"
+)
+
+
+if not figures:
+
+    st.warning(
+        "No valid power curves could be generated for the selected turbines."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# DISPLAY TWO GRAPHS PER ROW
+# ==========================================================
+
+cols = st.columns(2)
+
+
+for i, (
+    turbine,
+    fig,
+    comment
+) in enumerate(figures):
+
+    with cols[i % 2]:
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
         )
 
-        return fig
+        with st.expander(
+            f"Analysis - {turbine}",
+            expanded=False
+        ):
 
-    # =========================
-    # COMMENT
-    # =========================
-    def generate_comment(dev):
-        if dev is None:
-            return "Data not available"
+            st.text(
+                comment
+            )
 
-        dev = round(dev, 2)
 
-        if dev < -72:
-            return f"Dev: {dev}% → Extreme issue (The Data unreliable)"
-        elif dev < -10:
-            return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
-        elif dev < -2:
-            return f"Dev: {dev}% → Underperformance (Control/availability)"
-        elif dev > 72:
-            return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
-        elif dev > 8:
-            return f"Dev: {dev}% → High overperformance"
-        elif dev > 2:
-            return f"Dev: {dev}% → Slight overperformance"
-        else:
-            return f"Dev: {dev}% → Normal performance"
+# ==========================================================
+# TURBINE DATA TABLE
+# ==========================================================
 
-    # =========================
-    # MODE
-    # =========================
-    turbines = df["Name"].unique()
+st.divider()
 
-    if mode == "Single Turbine":
-        turbines_to_show = [st.sidebar.selectbox("Select Turbine", turbines, key="single_turbine")]
-    elif mode == "Compare Turbines":
-        turbines_to_show = st.sidebar.multiselect("Select Turbines", turbines, key="compare_turbines")
-    else:
-        turbines_to_show = turbines
+st.subheader(
+    "Turbine Performance Summary"
+)
 
-    # =========================
-    # DISPLAY
-    # =========================
-    cols = st.columns(2)
-    results = []
-    figures = []
-    i = 0
 
-    for t in turbines_to_show:
-        res = process_turbine(t)
-        if not res:
+results_df = pd.DataFrame(
+    results
+)
+
+
+if not results_df.empty:
+
+    # Sort by average power
+
+    results_df = (
+        results_df
+        .sort_values(
+            by="Average Power",
+            ascending=False
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+    # Add rank
+
+    results_df.insert(
+        0,
+        "Rank",
+        np.arange(
+            1,
+            len(results_df) + 1
+        )
+    )
+
+
+    st.dataframe(
+        results_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ==========================================================
+# TURBINE COMPARISON
+# ==========================================================
+
+if (
+    mode == "Compare Turbines"
+    and
+    len(figures) > 1
+):
+
+    st.divider()
+
+    st.subheader(
+        "Turbine Comparison"
+    )
+
+
+    comparison_fig = go.Figure()
+
+
+    for turbine, fig, comment in figures:
+
+        result = process_turbine(
+            turbine
+        )
+
+        if result is None:
             continue
 
-        df_t, merged, dev, std = res
+        curve = result["curve"]
 
-        with cols[i % 2]:
-            fig = plot_graph(df_t, merged, t, dev)
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown("### Analysis")
-            st.code(generate_comment(dev))
 
-        figures.append((t, fig, generate_comment(dev)))
+        comparison_fig.add_trace(
+            go.Scatter(
+                x=curve["WindBin"],
+                y=curve["SmoothPower"],
+                mode="lines+markers",
+                name=turbine,
 
-        if -2 <= dev <= 2:
-            status = "Normal"
-        elif 2 < dev <= 8:
-            status = "Slight Over"
-        elif dev > 8:
-            status = "High Over"
-        elif -10 <= dev < -2:
-            status = "Under"
-        elif dev < -10:
-            status = "High Under"
-        else:
-            status = "Issue"
-
-        results.append({
-            "Turbine": t,
-            "Deviation_%": round(dev, 2),
-            "Status": status
-        })
-
-        i += 1
-
-    # =========================
-    # RANKING TABLE
-    # =========================
-    st.subheader("Turbine Ranking")
-
-    results_df = pd.DataFrame(results)
-
-    if not results_df.empty:
-        results_df = results_df.sort_values(by="Deviation_%")
-
-        def color_row(row):
-            if row["Status"] == "Normal":
-                return ['background-color: #ccffcc'] * len(row)
-            elif row["Status"] == "Slight Over":
-                return ['background-color: #66ff66'] * len(row)
-            elif row["Status"] == "High Over":
-                return ['background-color: #009933'] * len(row)
-            elif row["Status"] == "Under":
-                return ['background-color: #ffcc66'] * len(row)
-            elif row["Status"] == "High Under":
-                return ['background-color: #ff6666'] * len(row)
-            else:
-                return ['background-color: #cccccc'] * len(row)
-
-        styled_table = results_df.style.apply(color_row, axis=1)
-        st.dataframe(styled_table, use_container_width=True)
-
-    # =========================
-    # PDF REPORT
-    # =========================
-    try:
-        pdf_buffer = io.BytesIO()
-        pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
-        width, height = landscape(A4)
-
-        if os.path.exists(logo_path):
-            pdf.drawImage(logo_path, 30, height - 80, width=120, height=40)
-
-        pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawString(170, height - 40, "Power Curve Analytics Report")
-
-        pdf.setFont("Helvetica", 10)
-        pdf.drawString(170, height - 60, f"Site: {site}")
-        pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
-
-        y = height - 120
-
-        for turbine, fig, comment in figures:
-            if KALEIDO_AVAILABLE:
-                try:
-                    img = fig.to_image(format="png")
-                    img_reader = ImageReader(io.BytesIO(img))
-
-                    if y < 260:
-                        pdf.showPage()
-                        y = height - 60
-
-                    pdf.drawImage(img_reader, 30, y - 220, width=360, height=200)
-
-                    pdf.setFont("Helvetica-Bold", 11)
-                    pdf.drawString(420, y - 40, turbine)
-
-                    pdf.setFont("Helvetica", 10)
-                    pdf.drawString(420, y - 60, comment)
-
-                    y -= 240
-                except Exception:
-                    pass
-
-        pdf.showPage()
-        pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(30, height - 40, "Turbine Ranking Summary")
-
-        y = height - 80
-        pdf.setFont("Helvetica", 10)
-
-        if not results_df.empty:
-            for _, row in results_df.iterrows():
-                line = f"{row['Turbine']} | {row['Deviation_%']} % | {row['Status']}"
-                pdf.drawString(40, y, line)
-                y -= 20
-
-                if y < 40:
-                    pdf.showPage()
-                    y = height - 40
-
-        pdf.save()
-        pdf_buffer.seek(0)
-
-        st.download_button(
-            label="Download Full Dashboard Report (PDF)",
-            data=pdf_buffer.getvalue(),
-            file_name="WindFarm_Full_Report.pdf",
-            mime="application/pdf"
+                hovertemplate=
+                f"{turbine}"
+                "<br>"
+                "Wind: %{x:.2f} m/s"
+                "<br>"
+                "Power: %{y:.2f}"
+                "<extra></extra>"
+            )
         )
 
-    except Exception as e:
-        st.error("PDF generation failed")
-        st.code(str(e))
+
+    comparison_fig.update_layout(
+
+        title="Turbine Actual Power Curve Comparison",
+
+        xaxis_title="Wind Speed (m/s)",
+
+        yaxis_title="Active Power",
+
+        height=650,
+
+        hovermode="x unified",
+
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0
+        )
+    )
+
+
+    st.plotly_chart(
+        comparison_fig,
+        use_container_width=True
+    )
+
+
+# ==========================================================
+# SITE-WIDE POWER CURVE
+# ==========================================================
+
+st.divider()
+
+st.subheader(
+    "Selected Site - Overall Power Curve"
+)
+
+
+site_plot_df = site_df.copy()
+
+
+site_plot_df = site_plot_df[
+    (site_plot_df[wind_col] >= 3)
+    &
+    (site_plot_df[wind_col] <= 25)
+    &
+    (site_plot_df[power_col] >= 0)
+]
+
+
+if not site_plot_df.empty:
+
+    site_plot_df["WindBin"] = (
+        np.floor(
+            site_plot_df[wind_col]
+            /
+            BIN_SIZE
+        )
+        *
+        BIN_SIZE
+    ).round(2)
+
+
+    site_curve = (
+        site_plot_df
+        .groupby("WindBin")
+        .agg(
+            AveragePower=(
+                power_col,
+                "mean"
+            ),
+
+            MinimumPower=(
+                power_col,
+                "min"
+            ),
+
+            MaximumPower=(
+                power_col,
+                "max"
+            ),
+
+            Records=(
+                power_col,
+                "count"
+            )
+        )
+        .reset_index()
+    )
+
+
+    site_curve = site_curve.sort_values(
+        "WindBin"
+    )
+
+
+    if len(site_curve) >= 7:
+
+        try:
+
+            site_curve["SmoothPower"] = (
+                savgol_filter(
+                    site_curve[
+                        "AveragePower"
+                    ],
+                    7,
+                    2
+                )
+            )
+
+        except Exception:
+
+            site_curve["SmoothPower"] = (
+                site_curve[
+                    "AveragePower"
+                ]
+            )
+
+    else:
+
+        site_curve["SmoothPower"] = (
+            site_curve[
+                "AveragePower"
+            ]
+        )
+
+
+    site_fig = go.Figure()
+
+
+    site_fig.add_trace(
+        go.Scatter(
+            x=site_curve["WindBin"],
+            y=site_curve["AveragePower"],
+            mode="lines+markers",
+
+            line=dict(
+                width=3
+            ),
+
+            marker=dict(
+                size=6
+            ),
+
+            name="Site Average"
+        )
+    )
+
+
+    site_fig.add_trace(
+        go.Scatter(
+            x=site_curve["WindBin"],
+            y=site_curve["SmoothPower"],
+            mode="lines",
+
+            line=dict(
+                width=4
+            ),
+
+            name="Site Smoothed Curve"
+        )
+    )
+
+
+    site_fig.update_layout(
+
+        title=f"{selected_site} - Overall Actual Power Curve",
+
+        xaxis_title="Wind Speed (m/s)",
+
+        yaxis_title="Average Active Power",
+
+        height=600,
+
+        hovermode="x unified"
+    )
+
+
+    st.plotly_chart(
+        site_fig,
+        use_container_width=True
+    )
+
+
+# ==========================================================
+# DOWNLOAD CURVE DATA
+# ==========================================================
+
+st.divider()
+
+st.subheader(
+    "Download Power Curve Data"
+)
+
+
+download_frames = []
+
+
+for turbine in turbines_to_show:
+
+    result = process_turbine(
+        turbine
+    )
+
+    if result is None:
+        continue
+
+
+    curve = result[
+        "curve"
+    ].copy()
+
+
+    curve.insert(
+        0,
+        "Turbine",
+        turbine
+    )
+
+
+    curve.insert(
+        0,
+        "Site",
+        selected_site
+    )
+
+
+    download_frames.append(
+        curve
+    )
+
+
+if download_frames:
+
+    combined_curve_data = pd.concat(
+        download_frames,
+        ignore_index=True
+    )
+
+
+    csv_data = (
+        combined_curve_data
+        .to_csv(
+            index=False
+        )
+        .encode("utf-8")
+    )
+
+
+    st.download_button(
+
+        label="Download Power Curve Data CSV",
+
+        data=csv_data,
+
+        file_name=(
+            f"{selected_site}"
+            "_Power_Curve_Data.csv"
+        ),
+
+        mime="text/csv"
+    )
+
+
+# ==========================================================
+# PDF REPORT
+# ==========================================================
+
+st.divider()
+
+st.subheader(
+    "PDF Report"
+)
+
+
+try:
+
+    pdf_buffer = io.BytesIO()
+
+
+    pdf = canvas.Canvas(
+        pdf_buffer,
+        pagesize=landscape(A4)
+    )
+
+
+    width, height = landscape(A4)
+
+
+    # ------------------------------------------------------
+    # PDF HEADER
+    # ------------------------------------------------------
+
+    if os.path.exists(
+        LOGO_PATH
+    ):
+
+        try:
+
+            pdf.drawImage(
+                LOGO_PATH,
+                30,
+                height - 80,
+                width=120,
+                height=40,
+                preserveAspectRatio=True
+            )
+
+        except Exception:
+
+            pass
+
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        16
+    )
+
+
+    pdf.drawString(
+        170,
+        height - 40,
+        "Power Curve Analytics Report"
+    )
+
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+
+    pdf.drawString(
+        170,
+        height - 60,
+        f"Site: {selected_site}"
+    )
+
+
+    pdf.drawString(
+        170,
+        height - 75,
+        f"Date Range: {start_day} to {end_day}"
+    )
+
+
+    pdf.drawString(
+        170,
+        height - 90,
+        f"Turbines: {num_turbines}"
+    )
+
+
+    # ------------------------------------------------------
+    # GRAPH PAGES
+    # ------------------------------------------------------
+
+    y = height - 120
+
+
+    for turbine, fig, comment in figures:
+
+        if KALEIDO_AVAILABLE:
+
+            try:
+
+                img = fig.to_image(
+                    format="png"
+                )
+
+
+                img_reader = ImageReader(
+                    io.BytesIO(img)
+                )
+
+
+                if y < 270:
+
+                    pdf.showPage()
+
+                    y = height - 60
+
+
+                pdf.drawImage(
+                    img_reader,
+                    30,
+                    y - 220,
+                    width=500,
+                    height=210,
+                    preserveAspectRatio=True
+                )
+
+
+                pdf.setFont(
+                    "Helvetica-Bold",
+                    11
+                )
+
+
+                pdf.drawString(
+                    550,
+                    y - 40,
+                    turbine
+                )
+
+
+                pdf.setFont(
+                    "Helvetica",
+                    9
+                )
+
+
+                comment_lines = (
+                    comment.split("\n")
+                )
+
+
+                text_y = y - 60
+
+
+                for line in comment_lines:
+
+                    pdf.drawString(
+                        550,
+                        text_y,
+                        line
+                    )
+
+                    text_y -= 14
+
+
+                y -= 240
+
+
+            except Exception:
+
+                pass
+
+
+    # ------------------------------------------------------
+    # SUMMARY PAGE
+    # ------------------------------------------------------
+
+    pdf.showPage()
+
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        14
+    )
+
+
+    pdf.drawString(
+        30,
+        height - 40,
+        "Turbine Performance Summary"
+    )
+
+
+    y = height - 80
+
+
+    pdf.setFont(
+        "Helvetica",
+        9
+    )
+
+
+    if not results_df.empty:
+
+        for _, row in results_df.iterrows():
+
+            line = (
+                f"Rank {row['Rank']} | "
+                f"{row['Turbine']} | "
+                f"Records: {row['SCADA Records']} | "
+                f"Avg Wind: {row['Average Wind']} | "
+                f"Avg Power: {row['Average Power']} | "
+                f"Max Power: {row['Maximum Power']}"
+            )
+
+
+            pdf.drawString(
+                30,
+                y,
+                line
+            )
+
+
+            y -= 18
+
+
+            if y < 40:
+
+                pdf.showPage()
+
+                y = height - 40
+
+
+    pdf.save()
+
+
+    pdf_buffer.seek(0)
+
+
+    st.download_button(
+
+        label="Download Full Dashboard Report (PDF)",
+
+        data=pdf_buffer.getvalue(),
+
+        file_name=(
+            f"{selected_site}"
+            "_Power_Curve_Report.pdf"
+        ),
+
+        mime="application/pdf"
+    )
+
+
+except Exception as e:
+
+    st.warning(
+        "PDF generation failed."
+    )
+
+    st.code(
+        str(e)
+    )
+
+
+# ==========================================================
+# DEBUG / DATA INFORMATION
+# ==========================================================
+
+with st.expander(
+    "Detected SCADA Columns"
+):
+
+    st.write(
+        {
+            "Site Column": site_col,
+            "Turbine Column": turbine_col,
+            "Wind Speed Column": wind_col,
+            "Power Column": power_col,
+            "Time Column": time_col,
+            "Pitch Column": pitch_col
+        }
+    )
+
+
+with st.expander(
+    "Selected Site Data Preview"
+):
+
+    st.dataframe(
+        site_df.head(100),
+        use_container_width=True
+    )
