@@ -589,17 +589,14 @@ def get_reference_site_names(
 
     sites = []
 
-    if not os.path.exists(
-        reference_path
-    ):
-
+    if reference_path is None:
         return sites
 
     try:
-
-        excel_file = pd.ExcelFile(
-            reference_path
-        )
+        if isinstance(reference_path, (bytes, bytearray)):
+            excel_file = pd.ExcelFile(io.BytesIO(reference_path))
+        else:
+            excel_file = pd.ExcelFile(reference_path)
 
         for sheet in excel_file.sheet_names:
 
@@ -1116,37 +1113,51 @@ with tab_admin:
 with tab_dashboard:
 
     # ======================================================
-    # SCADA UPLOAD
+    # UPLOAD SCADA + REFERENCE FILE
     # ======================================================
 
     st.sidebar.subheader(
-        "Upload SCADA File"
+        "Upload Input Files"
     )
 
     uploaded_file = st.sidebar.file_uploader(
-        "Upload SCADA CSV",
+        "1. Upload SCADA CSV",
         type=["csv"],
         key="scada_upload"
     )
 
+    uploaded_reference = st.sidebar.file_uploader(
+        "2. Upload Reference Excel",
+        type=["xlsx"],
+        key="dashboard_reference_upload"
+    )
+
     if uploaded_file is None:
-
-        st.warning(
-            "Please upload SCADA file"
-        )
-
+        st.warning("Please upload the SCADA CSV file.")
         st.stop()
 
-    if not os.path.exists(
-        REF_FILE_PATH
-    ):
+    if uploaded_reference is None:
+        st.warning("Please upload the updated Reference Excel file.")
+        st.stop()
 
+    reference_bytes = uploaded_reference.getvalue()
+
+    # Detect sites directly from the uploaded reference workbook.
+    uploaded_reference_sites = get_reference_site_names(reference_bytes)
+
+    if not uploaded_reference_sites:
         st.error(
-            "Reference Excel is missing. "
-            "Upload `reference.xlsx` in the Admin tab."
+            "No site names could be detected in the uploaded reference Excel. "
+            "Please check the Power Curve sheet/header format."
         )
-
         st.stop()
+
+    # Add newly uploaded reference sites to capacity map.
+    for ref_site in uploaded_reference_sites:
+        if normalize_site_name(ref_site) not in {
+            normalize_site_name(x) for x in SITE_CAPACITY.keys()
+        }:
+            SITE_CAPACITY[ref_site] = 3.3
 
     # ======================================================
     # SITE + MODE
@@ -1154,9 +1165,7 @@ with tab_dashboard:
 
     site = st.sidebar.selectbox(
         "Select Site",
-        list(
-            SITE_CAPACITY.keys()
-        ),
+        uploaded_reference_sites,
         key="site_select"
     )
 
@@ -2058,7 +2067,7 @@ with tab_dashboard:
     try:
 
         ref_curve = load_reference(
-            REF_FILE_PATH,
+            reference_bytes,
             site
         )
 
@@ -2252,7 +2261,8 @@ with tab_dashboard:
         df_t,
         merged,
         title,
-        dev
+        dev,
+        show_deviation=True
     ):
 
         if (
@@ -2370,6 +2380,8 @@ with tab_dashboard:
                 text=(
                     f"{title} "
                     f"(Dev: {round(dev, 2)}%)"
+                    if show_deviation
+                    else title
                 ),
 
                 font=dict(
@@ -2481,9 +2493,7 @@ with tab_dashboard:
             )
         )
 
-        turbines_to_show = [
-            selected_turbine
-        ]
+        turbines_to_show = [selected_turbine]
 
     elif mode == "Compare Turbines":
 
@@ -2500,116 +2510,128 @@ with tab_dashboard:
         turbines_to_show = turbines
 
     # ======================================================
-    # DISPLAY
+    # PROCESS ALL SELECTED TURBINES
     # ======================================================
 
-    cols = st.columns(2)
-
     results = []
-
-    figures = []
-
-    i = 0
+    processed = []
 
     for t in turbines_to_show:
 
-        res = process_turbine(
-            t
-        )
+        res = process_turbine(t)
 
         if res is None:
-
             continue
 
-        (
-            df_t,
-            merged,
-            dev,
-            std
-        ) = res
-
-        # --------------------------------------------------
-        # GRAPH
-        # --------------------------------------------------
-
-        fig = plot_graph(
-            df_t,
-            merged,
-            t,
-            dev
-        )
-
-        with cols[
-            i % 2
-        ]:
-
-            st.plotly_chart(
-                fig,
-                use_container_width=True
-            )
-
-            st.markdown(
-                "### Analysis"
-            )
-
-            st.code(
-                generate_comment(
-                    dev
-                )
-            )
-
-        figures.append(
-            (
-                t,
-                fig,
-                generate_comment(
-                    dev
-                )
-            )
-        )
-
-        # --------------------------------------------------
-        # STATUS
-        # --------------------------------------------------
+        df_t, merged, dev, std = res
 
         if -2 <= dev <= 2:
-
             status = "Normal"
-
         elif 2 < dev <= 8:
-
             status = "Slight Over"
-
         elif dev > 8:
-
             status = "High Over"
-
         elif -10 <= dev < -2:
-
             status = "Under"
-
         elif dev < -10:
-
             status = "High Under"
-
         else:
-
             status = "Issue"
 
-        results.append(
-            {
-                "Turbine": t,
+        comment = generate_comment(dev)
 
-                "Deviation_%": round(
-                    dev,
-                    2
-                ),
+        results.append({
+            "Turbine": t,
+            "Deviation_%": round(dev, 2),
+            "Status": status
+        })
 
-                "Status": status
-            }
+        processed.append({
+            "turbine": t,
+            "df_t": df_t,
+            "merged": merged,
+            "dev": dev,
+            "std": std,
+            "comment": comment
+        })
+
+    # ======================================================
+    # DASHBOARD: 6 GRAPHS PER PAGE (3 x 2)
+    # ======================================================
+
+    st.subheader("Power Curve Graphs")
+
+    if not processed:
+        st.warning("No turbines have enough valid data for the selected filters.")
+    else:
+        GRAPHS_PER_PAGE = 6
+        total_pages = max(1, int(np.ceil(len(processed) / GRAPHS_PER_PAGE)))
+
+        if total_pages > 1:
+            page = st.sidebar.number_input(
+                "Graph Page",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key="graph_page"
+            )
+        else:
+            page = 1
+
+        page = int(page)
+        start_idx = (page - 1) * GRAPHS_PER_PAGE
+        page_items = processed[start_idx:start_idx + GRAPHS_PER_PAGE]
+
+        st.caption(
+            f"Showing graphs {start_idx + 1}-{start_idx + len(page_items)} "
+            f"of {len(processed)} | Page {page} of {total_pages}"
         )
 
-        i += 1
+        cols = st.columns(3)
+
+        for local_i, item in enumerate(page_items):
+
+            t = item["turbine"]
+            df_t = item["df_t"]
+            merged = item["merged"]
+            dev = item["dev"]
+            comment = item["comment"]
+
+            key_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(t))
+            detail_key = f"show_details_{key_name}"
+
+            with cols[local_i % 3]:
+
+                show_details = st.checkbox(
+                    "Show deviation & comment",
+                    value=st.session_state.get(detail_key, True),
+                    key=detail_key
+                )
+
+                fig = plot_graph(
+                    df_t,
+                    merged,
+                    t,
+                    dev,
+                    show_deviation=show_details
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    key=f"graph_{key_name}_{page}"
+                )
+
+                if show_details:
+                    st.markdown("**Analysis**")
+                    st.code(comment)
+
+    # ======================================================
+    # RANKING TABLE DATA
+    # ======================================================
+
+    results_df = pd.DataFrame(results)
 
     # ======================================================
     # RANKING TABLE
@@ -2617,10 +2639,6 @@ with tab_dashboard:
 
     st.subheader(
         "Turbine Ranking"
-    )
-
-    results_df = pd.DataFrame(
-        results
     )
 
     if not results_df.empty:
@@ -2698,214 +2716,137 @@ with tab_dashboard:
     # ======================================================
 
     try:
-
         pdf_buffer = io.BytesIO()
-
         pdf = canvas.Canvas(
             pdf_buffer,
             pagesize=landscape(A4)
         )
-
         width, height = landscape(A4)
 
-        # --------------------------------------------------
-        # LOGO
-        # --------------------------------------------------
+        # PDF option: independent from dashboard graph checkboxes.
+        include_pdf_details = st.checkbox(
+            "Include deviation and comments in PDF",
+            value=True,
+            key="include_pdf_details"
+        )
 
-        if os.path.exists(
-            logo_path
-        ):
-
+        if os.path.exists(logo_path):
             pdf.drawImage(
-                logo_path,
-                30,
-                height - 80,
-                width=120,
-                height=40
+                logo_path, 30, height - 80,
+                width=120, height=40,
+                preserveAspectRatio=True, mask='auto'
             )
 
-        # --------------------------------------------------
-        # TITLE
-        # --------------------------------------------------
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.drawString(170, height - 40, "Power Curve Analytics Report")
+        pdf.setFont("Helvetica", 10)
+        pdf.drawString(170, height - 60, f"Site: {site}")
+        pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
 
-        pdf.setFont(
-            "Helvetica-Bold",
-            16
-        )
+        # 6 graphs per PDF page: 3 columns x 2 rows.
+        graph_width = 250
+        graph_height = 145
+        x_positions = [25, 285, 545]
+        y_positions = [height - 315, height - 535]
 
-        pdf.drawString(
-            170,
-            height - 40,
-            "Power Curve Analytics Report"
-        )
+        for idx, item in enumerate(processed):
+            if idx % 6 == 0:
+                if idx != 0:
+                    pdf.showPage()
+                if idx != 0 or True:
+                    if os.path.exists(logo_path):
+                        pdf.drawImage(
+                            logo_path, 20, height - 55,
+                            width=90, height=30,
+                            preserveAspectRatio=True, mask='auto'
+                        )
+                    pdf.setFont("Helvetica-Bold", 13)
+                    pdf.drawString(125, height - 35, "Power Curve Analytics Report")
+                    pdf.setFont("Helvetica", 8)
+                    pdf.drawString(125, height - 50, f"Site: {site} | {start_day} to {end_day}")
 
-        pdf.setFont(
-            "Helvetica",
-            10
-        )
+            if not KALEIDO_AVAILABLE:
+                continue
 
-        pdf.drawString(
-            170,
-            height - 60,
-            f"Site: {site}"
-        )
+            try:
+                show_details_pdf = include_pdf_details
+                pdf_fig = plot_graph(
+                    item["df_t"],
+                    item["merged"],
+                    item["turbine"],
+                    item["dev"],
+                    show_deviation=show_details_pdf
+                )
 
-        pdf.drawString(
-            170,
-            height - 75,
-            f"Date Range: "
-            f"{start_day} to {end_day}"
-        )
+                img = pdf_fig.to_image(format="png")
+                img_reader = ImageReader(io.BytesIO(img))
 
-        y = height - 120
+                slot = idx % 6
+                col = slot % 3
+                row = slot // 3
+                x = x_positions[col]
+                y = y_positions[row]
 
-        # ==================================================
-        # GRAPH REPORT
-        # ==================================================
+                pdf.drawImage(
+                    img_reader,
+                    x,
+                    y,
+                    width=graph_width,
+                    height=graph_height,
+                    preserveAspectRatio=True,
+                    anchor='c'
+                )
 
-        for (
-            turbine,
-            fig,
-            comment
-        ) in figures:
+                pdf.setFont("Helvetica-Bold", 8)
+                pdf.drawString(x, y - 10, str(item["turbine"])[:38])
 
-            if KALEIDO_AVAILABLE:
+                if include_pdf_details:
+                    pdf.setFont("Helvetica", 7)
+                    comment_text = item["comment"][:75]
+                    pdf.drawString(x, y - 20, comment_text)
 
-                try:
+            except Exception:
+                pass
 
-                    img = fig.to_image(
-                        format="png"
-                    )
-
-                    img_reader = ImageReader(
-                        io.BytesIO(img)
-                    )
-
-                    if y < 260:
-
-                        pdf.showPage()
-
-                        y = height - 60
-
-                    pdf.drawImage(
-                        img_reader,
-                        30,
-                        y - 220,
-                        width=360,
-                        height=200
-                    )
-
-                    pdf.setFont(
-                        "Helvetica-Bold",
-                        11
-                    )
-
-                    pdf.drawString(
-                        420,
-                        y - 40,
-                        turbine
-                    )
-
-                    pdf.setFont(
-                        "Helvetica",
-                        10
-                    )
-
-                    pdf.drawString(
-                        420,
-                        y - 60,
-                        comment
-                    )
-
-                    y -= 240
-
-                except Exception:
-
-                    pass
-
-        # ==================================================
-        # RANKING PAGE
-        # ==================================================
-
+        # Ranking summary starts on a separate page.
         pdf.showPage()
-
-        pdf.setFont(
-            "Helvetica-Bold",
-            14
-        )
-
-        pdf.drawString(
-            30,
-            height - 40,
-            "Turbine Ranking Summary"
-        )
-
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(30, height - 40, "Turbine Ranking Summary")
         y = height - 80
-
-        pdf.setFont(
-            "Helvetica",
-            10
-        )
+        pdf.setFont("Helvetica", 9)
 
         if not results_df.empty:
-
             for _, row in results_df.iterrows():
-
                 line = (
                     f"{row['Turbine']} | "
                     f"{row['Deviation_%']} % | "
                     f"{row['Status']}"
                 )
-
-                pdf.drawString(
-                    40,
-                    y,
-                    line
-                )
-
-                y -= 20
-
+                pdf.drawString(40, y, line[:120])
+                y -= 16
                 if y < 40:
-
                     pdf.showPage()
-
                     y = height - 40
-
-                    pdf.setFont(
-                        "Helvetica",
-                        10
-                    )
+                    pdf.setFont("Helvetica", 9)
 
         pdf.save()
-
         pdf_buffer.seek(0)
 
-        # ==================================================
-        # DOWNLOAD
-        # ==================================================
+        if not KALEIDO_AVAILABLE:
+            st.warning(
+                "PDF download is available, but graph images require Kaleido. "
+                "Add `kaleido` to requirements.txt for graph images in the PDF."
+            )
 
         st.download_button(
-
-            label=(
-                "Download Full Dashboard "
-                "Report (PDF)"
-            ),
-
+            label="Download Full Dashboard Report (PDF)",
             data=pdf_buffer.getvalue(),
-
-            file_name=(
-                "WindFarm_Full_Report.pdf"
-            ),
-
+            file_name="WindFarm_Full_Report.pdf",
             mime="application/pdf"
         )
 
     except Exception as e:
+        st.error("PDF generation failed")
+        st.code(str(e))
 
-        st.error(
-            "PDF generation failed"
-        )
 
-        st.code(
-            str(e)
-        )
