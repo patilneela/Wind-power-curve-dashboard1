@@ -161,7 +161,8 @@ DEFAULT_SITE_CAPACITY = {
         "Cleanmax Honavad",
         "Blueleaf Agar",
         "JSW_Sandur",
-        "India_Hero_Doni"
+        "India_Hero_Doni",
+        
     ]
 }
 
