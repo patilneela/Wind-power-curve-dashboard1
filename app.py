@@ -7,7 +7,6 @@ from datetime import timedelta
 import os
 import io
 
-
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
@@ -80,10 +79,6 @@ def get_site_master_path():
     return None
 
 def compute_preset_range(preset: str, today_ts: pd.Timestamp):
-    """
-    Returns (start_day, end_day) as python dates, inclusive.
-    Based on real "today".
-    """
     today_date = today_ts.normalize().date()
 
     if preset == "Today":
@@ -110,6 +105,23 @@ def compute_preset_range(preset: str, today_ts: pd.Timestamp):
         return start, last_month_end
 
     return None
+
+def normalize_text(s):
+    if pd.isna(s):
+        return ""
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+    )
 
 # =========================
 # LOGO
@@ -162,7 +174,6 @@ DEFAULT_SITE_CAPACITY = {
         "Blueleaf Agar",
         "JSW_Sandur",
         "India_Hero_Doni",
-        
     ]
 }
 
@@ -210,6 +221,27 @@ def load_site_capacity():
 
 SITE_CAPACITY = load_site_capacity()
 
+# =========================
+# SITE NAME ALIAS MAP FOR NEW REFERENCE FILE
+# =========================
+SITE_REFERENCE_ALIASES = {
+    "CleanMax Motadevaliya": ["cleanmaxgujarat", "cleanmaxgujaratden1142"],
+    "Renew-4 Kudligi": ["renew4kudligika", "renew4kudligika den1076"],
+    "Renew Otha": ["renew4othagj", "renew4otha", "otha"],
+    "Otha Pithalpur-GJ": ["renewpithalurgj", "pithalur", "pithalpur"],
+    "Clean max Jagalur": ["cleanmaxjagalurka", "jagalur"],
+    "partner Ottapidaum": ["fourthpartnerottapidaramtn", "ottapidaram"],
+    "Sembcorp Tuticorin": ["sembcorptuticorintn", "tuticorin"],
+    "AMGEPL,Kurnool AP": ["amgpelkurnool", "kurnool"],
+    "JSW_Sandur": ["jswsandurka", "jswsandur"],
+    "Ayana Amerli": ["ayanaamreligj", "ayanaamreli", "amreli"],
+    "Sprng TN": ["sprngmulanurtn", "mulanur"],
+    "ACME Shapar": ["acmeshapurgj", "shapur", "shapar"],
+    "Cleanmax Honavad": ["cleanmaxhonavadka", "honavad"],
+    "RenfraEnergy Trichy": ["renfratrichytn", "trichy"],
+    "ReNew1_Gadag": ["renewgadagka", "gadag"],
+    "Wanki": ["nslap", "wanki"]
+}
 
 # =========================
 # TABS
@@ -261,7 +293,7 @@ with tab_admin:
     if os.path.exists(REF_FILE_PATH):
         with st.expander("Preview reference.xlsx (first 30 rows)"):
             try:
-                tmp = pd.read_excel(REF_FILE_PATH, header=None)
+                tmp = pd.read_excel(REF_FILE_PATH, sheet_name="Power Curve", header=None)
                 st.dataframe(tmp.head(30), use_container_width=True)
             except Exception as e:
                 st.error("Unable to read reference.xlsx")
@@ -398,7 +430,7 @@ with tab_dashboard:
         st.stop()
 
     # =========================
-    # DATE FILTER (Single dropdown + Manual calendar)
+    # DATE FILTER
     # =========================
     st.sidebar.markdown("### Date Range")
 
@@ -437,7 +469,6 @@ with tab_dashboard:
         else:
             start_day, end_day = rng
 
-    # Day-wise filter (ignore time)
     df["_date_only"] = df[time_col].dt.date
     df = df[(df["_date_only"] >= start_day) & (df["_date_only"] <= end_day)]
     df = df.drop(columns=["_date_only"])
@@ -464,31 +495,66 @@ with tab_dashboard:
     st.markdown(f"Date Range: {start_day} → {end_day}")
 
     # =========================
-    # LOAD REFERENCE
+    # LOAD REFERENCE - UPDATED FOR NEW EXCEL FORMAT
     # =========================
     @st.cache_data
     def load_reference(site_name):
-        ref_raw = pd.read_excel(REF_FILE_PATH, header=None)
+        try:
+            ref_raw = pd.read_excel(REF_FILE_PATH, sheet_name="Power Curve", header=None)
+        except Exception as e:
+            st.error("Unable to open Power Curve sheet in reference.xlsx")
+            st.code(str(e))
+            st.stop()
 
-        for r in range(ref_raw.shape[0]):
-            for c in range(ref_raw.shape[1]):
-                cell = str(ref_raw.iloc[r, c])
-                if site_name.lower() in cell.lower():
-                    ref = ref_raw.iloc[r + 2:r + 60, [c - 1, c + 3]].copy()
-                    ref.columns = ["WindSpeed", "RefPower"]
-                    ref = ref.dropna()
+        if ref_raw.shape[0] < 5 or ref_raw.shape[1] < 2:
+            st.error("reference.xlsx Power Curve sheet format is invalid.")
+            st.stop()
 
-                    ref["WindSpeed"] = pd.to_numeric(ref["WindSpeed"], errors="coerce")
-                    ref["RefPower"] = pd.to_numeric(ref["RefPower"], errors="coerce")
-                    ref = ref.dropna()
+        site_headers = ref_raw.iloc[2].copy()
+        wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
 
-                    wind_bins = np.arange(4, 15, BIN_SIZE)
-                    ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
+        normalized_site = normalize_text(site_name)
+        aliases = [normalized_site] + [normalize_text(x) for x in SITE_REFERENCE_ALIASES.get(site_name, [])]
 
-                    return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
+        matched_col = None
 
-        st.error("Site not found in reference.xlsx. Upload updated reference in Admin tab.")
-        st.stop()
+        for col_idx in range(1, ref_raw.shape[1]):
+            header_text = normalize_text(site_headers.iloc[col_idx])
+            if not header_text:
+                continue
+
+            if any(alias and alias in header_text for alias in aliases):
+                matched_col = col_idx
+                break
+
+        if matched_col is None:
+            available_sites = [
+                str(site_headers.iloc[c]).strip()
+                for c in range(1, ref_raw.shape[1])
+                if pd.notna(site_headers.iloc[c])
+            ]
+            st.error(f"Selected site '{site_name}' not found in reference.xlsx Power Curve sheet.")
+            st.write("Available reference sites:")
+            st.write(available_sites)
+            st.stop()
+
+        ref_power = pd.to_numeric(ref_raw.iloc[3:, matched_col], errors="coerce")
+
+        ref = pd.DataFrame({
+            "WindSpeed": wind_series,
+            "RefPower": ref_power
+        }).dropna()
+
+        ref = ref[(ref["WindSpeed"] >= 3) & (ref["WindSpeed"] <= 25)]
+
+        if ref.empty:
+            st.error(f"No valid reference data found for site '{site_name}'.")
+            st.stop()
+
+        wind_bins = np.arange(4, 15, BIN_SIZE)
+        ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
+
+        return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
 
     ref_curve = load_reference(site)
 
@@ -532,14 +598,13 @@ with tab_dashboard:
         return df_t, merged, avg_dev, std_dev
 
     # =========================
-    # PLOT GRAPH (UPDATED COLORS + ORDER)
+    # PLOT GRAPH
     # =========================
     def plot_graph(df_t, merged, title, dev):
         title_color = "green" if -2 <= dev <= 2 else ("orange" if dev < -2 else "red")
 
         fig = go.Figure()
 
-        # 1) Scatter first (bottom)
         fig.add_trace(go.Scatter(
             x=df_t[wind_col],
             y=df_t[power_col],
@@ -552,7 +617,6 @@ with tab_dashboard:
             name="Scatter points"
         ))
 
-        # 2) Reference second (middle)
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
             y=merged["RefPower"],
@@ -565,7 +629,6 @@ with tab_dashboard:
             name="Reference"
         ))
 
-        # 3) Actual last (top) - GREEN
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
             y=merged["AvgPower"],
