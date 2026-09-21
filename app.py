@@ -17,7 +17,7 @@ from reportlab.lib.utils import ImageReader
 st.set_page_config(layout="wide")
 
 # =========================
-# SIMPLE LOCK (single user)
+# SIMPLE LOCK
 # =========================
 def login_gate():
     if "authenticated" not in st.session_state:
@@ -51,7 +51,9 @@ if st.sidebar.button("Logout", key="logout_btn"):
     st.session_state.authenticated = False
     st.rerun()
 
+# =========================
 # SAFE KALEIDO CHECK
+# =========================
 try:
     import kaleido  # noqa: F401
     KALEIDO_AVAILABLE = True
@@ -67,6 +69,8 @@ SITE_MASTER_XLSX = os.path.join(BASE_DIR, "site_master.xlsx")
 SITE_MASTER_CSV = os.path.join(BASE_DIR, "site_master.csv")
 
 BIN_SIZE = 0.5
+MIN_VALID_ROWS_FOR_PLOT = 8
+MIN_VALID_BINS_FOR_DEV = 3
 
 # =========================
 # HELPERS
@@ -138,7 +142,7 @@ with col2:
 st.title("Power Curve Analytics Report")
 
 # =========================
-# DEFAULT SITE CAPACITY (fallback)
+# DEFAULT SITE CAPACITY
 # =========================
 DEFAULT_SITE_CAPACITY = {
     site: 3.3 for site in [
@@ -222,11 +226,11 @@ def load_site_capacity():
 SITE_CAPACITY = load_site_capacity()
 
 # =========================
-# SITE NAME ALIAS MAP FOR NEW REFERENCE FILE
+# REFERENCE ALIASES
 # =========================
 SITE_REFERENCE_ALIASES = {
-    "CleanMax Motadevaliya": ["cleanmaxgujarat", "cleanmaxgujaratden1142"],
-    "Renew-4 Kudligi": ["renew4kudligika", "renew4kudligika den1076"],
+    "CleanMax Motadevaliya": ["cleanmaxgujarat"],
+    "Renew-4 Kudligi": ["renew4kudligika"],
     "Renew Otha": ["renew4othagj", "renew4otha", "otha"],
     "Otha Pithalpur-GJ": ["renewpithalurgj", "pithalur", "pithalpur"],
     "Clean max Jagalur": ["cleanmaxjagalurka", "jagalur"],
@@ -240,7 +244,7 @@ SITE_REFERENCE_ALIASES = {
     "Cleanmax Honavad": ["cleanmaxhonavadka", "honavad"],
     "RenfraEnergy Trichy": ["renfratrichytn", "trichy"],
     "ReNew1_Gadag": ["renewgadagka", "gadag"],
-    "Wanki": ["nslap", "wanki"]
+    "Wanki": ["nslap", "wanki"],
 }
 
 # =========================
@@ -356,24 +360,10 @@ with tab_admin:
             else:
                 st.info("No Site Master file to delete.")
 
-    existing_sm = get_site_master_path()
-    if existing_sm:
-        with st.expander("Preview Site Master"):
-            try:
-                if existing_sm.endswith(".csv"):
-                    sm_df = pd.read_csv(existing_sm)
-                else:
-                    sm_df = pd.read_excel(existing_sm)
-                st.dataframe(sm_df.head(50), use_container_width=True)
-            except Exception as e:
-                st.error("Unable to read Site Master file.")
-                st.code(str(e))
-
 # ==========================================================
 # TAB: DASHBOARD
 # ==========================================================
 with tab_dashboard:
-
     st.sidebar.subheader("Upload SCADA File")
     uploaded_file = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"], key="scada_upload")
 
@@ -388,18 +378,10 @@ with tab_dashboard:
     site = st.sidebar.selectbox("Select Site", list(SITE_CAPACITY.keys()), key="site_select")
     mode = st.sidebar.radio("Select View", ["Single Turbine", "Compare Turbines", "Show All Turbines"], key="mode_radio")
 
-    # =========================
-    # LOAD SCADA
-    # =========================
     @st.cache_data(show_spinner=True)
     def load_scada(file):
         chunksize = 200000
-        chunks = pd.read_csv(
-            file,
-            chunksize=chunksize,
-            low_memory=False,
-            engine="c"
-        )
+        chunks = pd.read_csv(file, chunksize=chunksize, low_memory=False, engine="c")
         df_local = pd.concat(chunks, ignore_index=True)
         df_local.columns = df_local.columns.str.strip()
 
@@ -407,19 +389,27 @@ with tab_dashboard:
             st.error("SCADA CSV must contain a 'Name' column for turbine identifier.")
             st.stop()
 
-        wind_col = [c for c in df_local.columns if "wind" in c.lower()][0]
-        power_col = [c for c in df_local.columns if "power" in c.lower() or "active" in c.lower()][0]
-        time_col = [c for c in df_local.columns if "time" in c.lower()][0]
-        pitch_col = [c for c in df_local.columns if "pitch" in c.lower()][0]
+        wind_matches = [c for c in df_local.columns if "wind" in c.lower()]
+        power_matches = [c for c in df_local.columns if "power" in c.lower() or "active" in c.lower()]
+        time_matches = [c for c in df_local.columns if "time" in c.lower()]
+        pitch_matches = [c for c in df_local.columns if "pitch" in c.lower()]
+
+        if not wind_matches or not power_matches or not time_matches or not pitch_matches:
+            st.error("Required SCADA columns not found. Need wind, power/active, time, and pitch columns.")
+            st.stop()
+
+        wind_col = wind_matches[0]
+        power_col = power_matches[0]
+        time_col = time_matches[0]
+        pitch_col = pitch_matches[0]
 
         df_local[time_col] = pd.to_datetime(df_local[time_col], errors="coerce")
         df_local[wind_col] = pd.to_numeric(df_local[wind_col], errors="coerce")
         df_local[power_col] = pd.to_numeric(df_local[power_col], errors="coerce")
         df_local[pitch_col] = pd.to_numeric(df_local[pitch_col], errors="coerce")
-
-        df_local = df_local.dropna(subset=[wind_col, power_col, time_col, pitch_col])
         df_local["Name"] = df_local["Name"].astype(str).str.strip()
 
+        df_local = df_local.dropna(subset=[time_col, wind_col, power_col, pitch_col])
         return df_local, wind_col, power_col, time_col, pitch_col
 
     with st.spinner("Loading SCADA file..."):
@@ -429,9 +419,6 @@ with tab_dashboard:
         st.warning("SCADA file has no valid rows after parsing.")
         st.stop()
 
-    # =========================
-    # DATE FILTER
-    # =========================
     st.sidebar.markdown("### Date Range")
 
     max_ts = df[time_col].max()
@@ -455,23 +442,17 @@ with tab_dashboard:
         st.sidebar.markdown("#### Manual Selection")
         start_day = st.sidebar.date_input("Start Date", value=st.session_state.manual_start_date, key="manual_start_date")
         end_day = st.sidebar.date_input("End Date", value=st.session_state.manual_end_date, key="manual_end_date")
-
     elif date_option == "Clear":
         st.session_state.manual_start_date = DEFAULT_START
         st.session_state.manual_end_date = DEFAULT_END
         start_day = DEFAULT_START
         end_day = DEFAULT_END
-
     else:
         rng = compute_preset_range(date_option, pd.Timestamp.today())
-        if rng is None:
-            start_day, end_day = DEFAULT_START, DEFAULT_END
-        else:
-            start_day, end_day = rng
+        start_day, end_day = rng if rng else (DEFAULT_START, DEFAULT_END)
 
     df["_date_only"] = df[time_col].dt.date
-    df = df[(df["_date_only"] >= start_day) & (df["_date_only"] <= end_day)]
-    df = df.drop(columns=["_date_only"])
+    df = df[(df["_date_only"] >= start_day) & (df["_date_only"] <= end_day)].drop(columns=["_date_only"])
 
     st.sidebar.caption(f"Applied Range: {start_day} → {end_day}")
 
@@ -479,9 +460,6 @@ with tab_dashboard:
         st.warning("No SCADA data available for the selected date range.")
         st.stop()
 
-    # =========================
-    # HEADER
-    # =========================
     num_turbines = df["Name"].nunique()
     capacity_per_turbine = SITE_CAPACITY.get(site, 3.3)
     total_capacity = num_turbines * capacity_per_turbine
@@ -494,9 +472,6 @@ with tab_dashboard:
     )
     st.markdown(f"Date Range: {start_day} → {end_day}")
 
-    # =========================
-    # LOAD REFERENCE - UPDATED FOR NEW EXCEL FORMAT
-    # =========================
     @st.cache_data
     def load_reference(site_name):
         try:
@@ -506,10 +481,6 @@ with tab_dashboard:
             st.code(str(e))
             st.stop()
 
-        if ref_raw.shape[0] < 5 or ref_raw.shape[1] < 2:
-            st.error("reference.xlsx Power Curve sheet format is invalid.")
-            st.stop()
-
         site_headers = ref_raw.iloc[2].copy()
         wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
 
@@ -517,14 +488,14 @@ with tab_dashboard:
         aliases = [normalized_site] + [normalize_text(x) for x in SITE_REFERENCE_ALIASES.get(site_name, [])]
 
         matched_col = None
+        matched_header = None
 
         for col_idx in range(1, ref_raw.shape[1]):
-            header_text = normalize_text(site_headers.iloc[col_idx])
-            if not header_text:
-                continue
-
+            header_text_raw = site_headers.iloc[col_idx]
+            header_text = normalize_text(header_text_raw)
             if any(alias and alias in header_text for alias in aliases):
                 matched_col = col_idx
+                matched_header = str(header_text_raw)
                 break
 
         if matched_col is None:
@@ -554,54 +525,113 @@ with tab_dashboard:
         wind_bins = np.arange(4, 15, BIN_SIZE)
         ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
 
-        return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
+        return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp}), matched_header
 
-    ref_curve = load_reference(site)
+    ref_curve, matched_reference_name = load_reference(site)
+    st.caption(f"Matched Reference Curve: {matched_reference_name}")
 
-    # =========================
-    # PROCESS TURBINE
-    # =========================
     def process_turbine(t):
-        df_t = df[df["Name"] == t].copy()
+        df_t_raw = df[df["Name"] == t].copy()
+        raw_rows = len(df_t_raw)
 
-        df_t = df_t[
-            (df_t[wind_col] >= 3) &
-            (df_t[wind_col] <= 25) &
-            (df_t[power_col] > 0) &
-            (df_t[pitch_col] >= -5) &
-            (df_t[pitch_col] <= 5)
-        ]
+        if raw_rows == 0:
+            return {
+                "ok": False,
+                "turbine": t,
+                "reason": "No rows for turbine",
+                "raw_rows": 0,
+                "filtered_rows": 0
+            }
 
-        if len(df_t) < 30:
-            return None
+        df_t = df_t_raw[
+            (df_t_raw[wind_col] >= 3) &
+            (df_t_raw[wind_col] <= 25) &
+            (df_t_raw[power_col] > 0) &
+            (df_t_raw[pitch_col] >= -5) &
+            (df_t_raw[pitch_col] <= 5)
+        ].copy()
 
-        std_dev = df_t[power_col].std()
+        filtered_rows = len(df_t)
+
+        if filtered_rows == 0:
+            return {
+                "ok": False,
+                "turbine": t,
+                "reason": "No valid rows after wind/power/pitch filters",
+                "raw_rows": raw_rows,
+                "filtered_rows": filtered_rows
+            }
+
+        if filtered_rows < MIN_VALID_ROWS_FOR_PLOT:
+            quality_note = f"Low data rows ({filtered_rows})"
+        else:
+            quality_note = "OK"
+
         df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
 
         actual = df_t.groupby("WindBin").agg(
-            AvgPower=(power_col, "mean")
+            AvgPower=(power_col, "mean"),
+            PointCount=(power_col, "count")
         ).reset_index()
+
+        if actual.empty:
+            return {
+                "ok": False,
+                "turbine": t,
+                "reason": "No wind bins formed after grouping",
+                "raw_rows": raw_rows,
+                "filtered_rows": filtered_rows
+            }
 
         merged = ref_curve.merge(actual, on="WindBin", how="left")
         valid = merged["AvgPower"].notna()
+        valid_bin_count = int(valid.sum())
 
-        if valid.sum() >= 7:
-            merged.loc[valid, "AvgPower"] = savgol_filter(
-                merged.loc[valid, "AvgPower"],
-                7,
-                2
-            )
+        if valid_bin_count == 0:
+            return {
+                "ok": False,
+                "turbine": t,
+                "reason": "No overlap between turbine data and reference bins",
+                "raw_rows": raw_rows,
+                "filtered_rows": filtered_rows
+            }
 
-        merged["Deviation_%"] = ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100
-        avg_dev = merged["Deviation_%"].mean(skipna=True)
+        if valid_bin_count >= 7:
+            try:
+                merged.loc[valid, "AvgPower"] = savgol_filter(
+                    merged.loc[valid, "AvgPower"],
+                    7,
+                    2
+                )
+            except Exception:
+                pass
 
-        return df_t, merged, avg_dev, std_dev
+        merged["Deviation_%"] = np.where(
+            merged["RefPower"] > 0,
+            ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100,
+            np.nan
+        )
 
-    # =========================
-    # PLOT GRAPH
-    # =========================
+        avg_dev = merged.loc[merged["Deviation_%"].notna(), "Deviation_%"].mean()
+
+        if pd.isna(avg_dev):
+            avg_dev = None
+
+        return {
+            "ok": True,
+            "turbine": t,
+            "df_t": df_t,
+            "merged": merged,
+            "avg_dev": avg_dev,
+            "raw_rows": raw_rows,
+            "filtered_rows": filtered_rows,
+            "valid_bins": valid_bin_count,
+            "quality_note": quality_note
+        }
+
     def plot_graph(df_t, merged, title, dev):
-        title_color = "green" if -2 <= dev <= 2 else ("orange" if dev < -2 else "red")
+        safe_dev = 0 if dev is None or pd.isna(dev) else dev
+        title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
 
         fig = go.Figure()
 
@@ -609,11 +639,7 @@ with tab_dashboard:
             x=df_t[wind_col],
             y=df_t[power_col],
             mode="markers",
-            marker=dict(
-                size=4,
-                opacity=0.35,
-                color="rgba(30, 144, 255, 0.55)"
-            ),
+            marker=dict(size=4, opacity=0.35, color="rgba(30, 144, 255, 0.55)"),
             name="Scatter points"
         ))
 
@@ -621,11 +647,7 @@ with tab_dashboard:
             x=merged["WindBin"],
             y=merged["RefPower"],
             mode="lines",
-            line=dict(
-                dash="dash",
-                width=3,
-                color="red"
-            ),
+            line=dict(dash="dash", width=3, color="red"),
             name="Reference"
         ))
 
@@ -633,20 +655,16 @@ with tab_dashboard:
             x=merged["WindBin"],
             y=merged["AvgPower"],
             mode="lines+markers",
-            line=dict(
-                width=4,
-                color="green"
-            ),
-            marker=dict(
-                size=6,
-                color="green"
-            ),
+            line=dict(width=4, color="green"),
+            marker=dict(size=6, color="green"),
             name="Actual"
         ))
 
+        dev_text = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
+
         fig.update_layout(
             title=dict(
-                text=f"{title} (Dev: {round(dev, 2)}%)",
+                text=f"{title} (Dev: {dev_text}%)",
                 font=dict(color=title_color)
             ),
             xaxis_title="Wind Speed",
@@ -656,12 +674,9 @@ with tab_dashboard:
 
         return fig
 
-    # =========================
-    # COMMENT
-    # =========================
     def generate_comment(dev):
-        if dev is None:
-            return "Data not available"
+        if dev is None or pd.isna(dev):
+            return "Deviation not available (insufficient valid bins)"
 
         dev = round(dev, 2)
 
@@ -680,10 +695,7 @@ with tab_dashboard:
         else:
             return f"Dev: {dev}% → Normal performance"
 
-    # =========================
-    # MODE
-    # =========================
-    turbines = df["Name"].unique()
+    turbines = df["Name"].dropna().unique()
 
     if mode == "Single Turbine":
         turbines_to_show = [st.sidebar.selectbox("Select Turbine", turbines, key="single_turbine")]
@@ -692,30 +704,44 @@ with tab_dashboard:
     else:
         turbines_to_show = turbines
 
-    # =========================
-    # DISPLAY
-    # =========================
     cols = st.columns(2)
     results = []
     figures = []
+    skipped = []
+    plotted_count = 0
     i = 0
 
     for t in turbines_to_show:
         res = process_turbine(t)
-        if not res:
+
+        if not res["ok"]:
+            skipped.append({
+                "Turbine": res["turbine"],
+                "Reason": res["reason"],
+                "Raw Rows": res["raw_rows"],
+                "Filtered Rows": res["filtered_rows"]
+            })
             continue
 
-        df_t, merged, dev, std = res
+        df_t = res["df_t"]
+        merged = res["merged"]
+        dev = res["avg_dev"]
+        quality_note = res["quality_note"]
 
         with cols[i % 2]:
             fig = plot_graph(df_t, merged, t, dev)
             st.plotly_chart(fig, use_container_width=True)
             st.markdown("### Analysis")
             st.code(generate_comment(dev))
+            if quality_note != "OK":
+                st.warning(quality_note)
 
         figures.append((t, fig, generate_comment(dev)))
+        plotted_count += 1
 
-        if -2 <= dev <= 2:
+        if dev is None or pd.isna(dev):
+            status = "Low Data"
+        elif -2 <= dev <= 2:
             status = "Normal"
         elif 2 < dev <= 8:
             status = "Slight Over"
@@ -730,21 +756,30 @@ with tab_dashboard:
 
         results.append({
             "Turbine": t,
-            "Deviation_%": round(dev, 2),
-            "Status": status
+            "Deviation_%": None if dev is None or pd.isna(dev) else round(dev, 2),
+            "Status": status,
+            "Raw Rows": res["raw_rows"],
+            "Filtered Rows": res["filtered_rows"],
+            "Valid Bins": res["valid_bins"]
         })
 
         i += 1
 
-    # =========================
-    # RANKING TABLE
-    # =========================
-    st.subheader("Turbine Ranking")
+    st.subheader("Processing Summary")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Turbines in File", len(turbines_to_show))
+    c2.metric("Plotted Turbines", plotted_count)
+    c3.metric("Skipped Turbines", len(skipped))
 
+    if skipped:
+        with st.expander("Skipped Turbine Details"):
+            st.dataframe(pd.DataFrame(skipped), use_container_width=True)
+
+    st.subheader("Turbine Ranking")
     results_df = pd.DataFrame(results)
 
     if not results_df.empty:
-        results_df = results_df.sort_values(by="Deviation_%")
+        results_df = results_df.sort_values(by="Deviation_%", na_position="last")
 
         def color_row(row):
             if row["Status"] == "Normal":
@@ -757,15 +792,16 @@ with tab_dashboard:
                 return ['background-color: #ffcc66'] * len(row)
             elif row["Status"] == "High Under":
                 return ['background-color: #ff6666'] * len(row)
+            elif row["Status"] == "Low Data":
+                return ['background-color: #d9d9d9'] * len(row)
             else:
                 return ['background-color: #cccccc'] * len(row)
 
         styled_table = results_df.style.apply(color_row, axis=1)
         st.dataframe(styled_table, use_container_width=True)
+    else:
+        st.info("No turbines available for ranking.")
 
-    # =========================
-    # PDF REPORT
-    # =========================
     try:
         pdf_buffer = io.BytesIO()
         pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
@@ -794,10 +830,8 @@ with tab_dashboard:
                         y = height - 60
 
                     pdf.drawImage(img_reader, 30, y - 220, width=360, height=200)
-
                     pdf.setFont("Helvetica-Bold", 11)
                     pdf.drawString(420, y - 40, turbine)
-
                     pdf.setFont("Helvetica", 10)
                     pdf.drawString(420, y - 60, comment)
 
@@ -814,7 +848,8 @@ with tab_dashboard:
 
         if not results_df.empty:
             for _, row in results_df.iterrows():
-                line = f"{row['Turbine']} | {row['Deviation_%']} % | {row['Status']}"
+                dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
+                line = f"{row['Turbine']} | {dev_text} % | {row['Status']}"
                 pdf.drawString(40, y, line)
                 y -= 20
 
