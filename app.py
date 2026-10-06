@@ -341,7 +341,7 @@ with tab_dashboard:
         df_local[wind_col] = pd.to_numeric(df_local[wind_col], errors="coerce")
         df_local[power_col] = pd.to_numeric(df_local[power_col], errors="coerce")
         df_local[pitch_col] = pd.to_numeric(df_local[pitch_col], errors="coerce")
-        df_local[nacelle_col] = pd.to_numeric(df_local[nacelle_col], errors=""coerce")
+        df_local[nacelle_col] = pd.to_numeric(df_local[nacelle_col], errors="coerce")
         df_local["Name"] = df_local["Name"].astype(str).str.strip()
 
         return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col
