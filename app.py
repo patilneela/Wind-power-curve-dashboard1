@@ -139,6 +139,45 @@ with col2:
 # =========================
 st.title("Power Curve Analytics Report")
 
+# =========================
+# DEFAULT SITE CAPACITY
+# =========================
+DEFAULT_SITE_CAPACITY = {
+    site: 3.3 for site in [
+        "CIP Hatalageri",
+        "JSW Tuljapur",
+        "Blupine Sagapara",
+        "Kalavad GJ",
+        "Kalavad_PH2",
+        "AMP_Energy",
+        "Wanki",
+        "CleanMax Motadevaliya",
+        "Ayana Amerli",
+        "Mahadev PH1",
+        "Blupine-I, Ambada-GJ",
+        "ACME Shapar",
+        "FP_Kudligi",
+        "Sprng TN",
+        "Otha Pithalpur-GJ",
+        "AMGEPL,Kurnool AP",
+        "ReNew1_Gadag",
+        "partner Ottapidaum",
+        "Cleanmax SANATHALI",
+        "Cleanmax Babra",
+        "RenfraEnergy Trichy",
+        "RENEW-03 Sholapur",
+        "Renew2 Chandwad",
+        "ReNew-4 Patoda",
+        "Clean max Jagalur",
+        "Sembcorp Tuticorin",
+        "Renew-4 Kudligi",
+        "Renew Otha",
+        "Cleanmax Honavad",
+        "Blueleaf Agar",
+        "JSW_Sandur",
+        "India_Hero_Doni",
+    ]
+}
 
 @st.cache_data
 def load_site_capacity():
@@ -286,26 +325,29 @@ with tab_dashboard:
         power_matches = [c for c in df_local.columns if "power" in c.lower() or "active" in c.lower()]
         time_matches = [c for c in df_local.columns if "time" in c.lower()]
         pitch_matches = [c for c in df_local.columns if "pitch" in c.lower()]
+        nacelle_matches = [c for c in df_local.columns if "nacelle" in c.lower()]
 
-        if not wind_matches or not power_matches or not time_matches or not pitch_matches:
-            st.error("Required SCADA columns not found. Need wind, power/active, time, and pitch columns.")
+        if not wind_matches or not power_matches or not time_matches or not pitch_matches or not nacelle_matches:
+            st.error("Required SCADA columns not found. Need wind, power/active, time, pitch, and nacelle columns.")
             st.stop()
 
         wind_col = wind_matches[0]
         power_col = power_matches[0]
         time_col = time_matches[0]
         pitch_col = pitch_matches[0]
+        nacelle_col = nacelle_matches[0]
 
         df_local[time_col] = pd.to_datetime(df_local[time_col], errors="coerce")
         df_local[wind_col] = pd.to_numeric(df_local[wind_col], errors="coerce")
         df_local[power_col] = pd.to_numeric(df_local[power_col], errors="coerce")
         df_local[pitch_col] = pd.to_numeric(df_local[pitch_col], errors="coerce")
+        df_local[nacelle_col] = pd.to_numeric(df_local[nacelle_col], errors=""coerce")
         df_local["Name"] = df_local["Name"].astype(str).str.strip()
 
-        return df_local, wind_col, power_col, time_col, pitch_col
+        return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col,
 
     with st.spinner("Loading SCADA file..."):
-        df, wind_col, power_col, time_col, pitch_col = load_scada(uploaded_file)
+        df, wind_col, power_col, time_col, pitch_col, nacelle_col = load_scada(uploaded_file)
 
     df = df.dropna(subset=["Name"])
 
@@ -410,7 +452,7 @@ with tab_dashboard:
             st.error(f"No valid reference data found for site '{site_name}'.")
             st.stop()
 
-        wind_bins = np.arange(4, 15, BIN_SIZE)
+        wind_bins = np.arange(0, 15, BIN_SIZE)
         ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
 
         return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp}), matched_header
@@ -451,6 +493,14 @@ with tab_dashboard:
             (df_t[power_col] > 0) &
             (df_t[pitch_col] >= -5) &
             (df_t[pitch_col] <= 5)
+            (df_t[nacelle_col >= 0) &
+            (df_t[nacelle_col <= 60)&
+            (df_t[nacelle_col >= 60) &
+            (df_t[nacelle_col <= 120)&
+            (df_t[nacelle_col >= 120) &
+            (df_t[nacelle_col <= 180)&
+            (df_t[nacelle_col >= 180) &
+            (df_t[nacelle_col <= 270)
         ].copy()
 
         if df_t.empty:
