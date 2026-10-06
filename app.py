@@ -139,45 +139,6 @@ with col2:
 # =========================
 st.title("Power Curve Analytics Report")
 
-# =========================
-# DEFAULT SITE CAPACITY
-# =========================
-DEFAULT_SITE_CAPACITY = {
-    site: 3.3 for site in [
-        "CIP Hatalageri",
-        "JSW Tuljapur",
-        "Blupine Sagapara",
-        "Kalavad GJ",
-        "Kalavad_PH2",
-        "AMP_Energy",
-        "Wanki",
-        "CleanMax Motadevaliya",
-        "Ayana Amerli",
-        "Mahadev PH1",
-        "Blupine-I, Ambada-GJ",
-        "ACME Shapar",
-        "FP_Kudligi",
-        "Sprng TN",
-        "Otha Pithalpur-GJ",
-        "AMGEPL,Kurnool AP",
-        "ReNew1_Gadag",
-        "partner Ottapidaum",
-        "Cleanmax SANATHALI",
-        "Cleanmax Babra",
-        "RenfraEnergy Trichy",
-        "RENEW-03 Sholapur",
-        "Renew2 Chandwad",
-        "ReNew-4 Patoda",
-        "Clean max Jagalur",
-        "Sembcorp Tuticorin",
-        "Renew-4 Kudligi",
-        "Renew Otha",
-        "Cleanmax Honavad",
-        "Blueleaf Agar",
-        "JSW_Sandur",
-        "India_Hero_Doni",
-    ]
-}
 
 @st.cache_data
 def load_site_capacity():
