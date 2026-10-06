@@ -344,7 +344,7 @@ with tab_dashboard:
         df_local[nacelle_col] = pd.to_numeric(df_local[nacelle_col], errors=""coerce")
         df_local["Name"] = df_local["Name"].astype(str).str.strip()
 
-        return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col,
+        return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col
 
     with st.spinner("Loading SCADA file..."):
         df, wind_col, power_col, time_col, pitch_col, nacelle_col = load_scada(uploaded_file)
