@@ -14,17 +14,15 @@ from reportlab.lib.utils import ImageReader
 st.set_page_config(layout="wide")
 
 # =========================
-# LOGIN
+# SIMPLE LOCK
 # =========================
 def login_gate():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
-
     if st.session_state.authenticated:
         return
 
     st.title("Login Required")
-
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Username", key="login_username")
         password = st.text_input("Password", type="password", key="login_password")
@@ -33,15 +31,12 @@ def login_gate():
     if submitted:
         cfg = st.secrets.get("auth", {})
         ok = (username == cfg.get("username")) and (password == cfg.get("password"))
-
         if ok:
             st.session_state.authenticated = True
             st.rerun()
         else:
             st.error("Invalid username or password")
-
     st.stop()
-
 
 login_gate()
 
@@ -66,7 +61,6 @@ REF_FILE_PATH = os.path.join(BASE_DIR, "reference.xlsx")
 SITE_MASTER_XLSX = os.path.join(BASE_DIR, "site_master.xlsx")
 SITE_MASTER_CSV = os.path.join(BASE_DIR, "site_master.csv")
 logo_path = os.path.join(BASE_DIR, "Envision.png")
-
 BIN_SIZE = 0.5
 
 # =========================
@@ -79,43 +73,33 @@ def get_site_master_path():
         return SITE_MASTER_CSV
     return None
 
-
 def compute_preset_range(preset: str, today_ts: pd.Timestamp):
     today_date = today_ts.normalize().date()
-
     if preset == "Today":
         return today_date, today_date
-
     if preset == "This Week":
         monday = today_date - timedelta(days=today_ts.weekday())
         return monday, today_date
-
     if preset == "Last Week":
         this_monday = today_date - timedelta(days=today_ts.weekday())
         start = this_monday - timedelta(days=7)
         end = this_monday - timedelta(days=1)
         return start, end
-
     if preset == "This Month":
         start = today_date.replace(day=1)
         return start, today_date
-
     if preset == "Last Month":
         first_this_month = today_date.replace(day=1)
         last_month_end = first_this_month - timedelta(days=1)
         start = last_month_end.replace(day=1)
         return start, last_month_end
-
     return None
-
 
 def normalize_text(s):
     if pd.isna(s):
         return ""
     return (
-        str(s)
-        .strip()
-        .lower()
+        str(s).strip().lower()
         .replace("-", "")
         .replace("_", "")
         .replace(",", "")
@@ -126,24 +110,19 @@ def normalize_text(s):
         .replace(".", "")
     )
 
-
 def detect_column(columns, candidates):
     normalized_map = {c: normalize_text(c) for c in columns}
-
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         exact = [col for col, norm in normalized_map.items() if norm == candidate_norm]
         if exact:
             return exact[0]
-
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         contains = [col for col, norm in normalized_map.items() if candidate_norm in norm]
         if contains:
             return contains[0]
-
     return None
-
 
 def get_nacelle_band(avg_nacelle):
     if avg_nacelle is None or pd.isna(avg_nacelle):
@@ -158,25 +137,19 @@ def get_nacelle_band(avg_nacelle):
         return "180-270"
     return "Out of Range"
 
-
 def generate_nacelle_comment(avg_nacelle):
     if avg_nacelle is None or pd.isna(avg_nacelle):
         return "Nacelle average not available"
-
     band = get_nacelle_band(avg_nacelle)
     val = round(avg_nacelle, 2)
-
     if band == "Out of Range":
         return f"NacelleAvg: {val}° → Out of configured range"
     return f"NacelleAvg: {val}° → Band {band}"
 
-
 def generate_performance_comment(dev):
     if dev is None or pd.isna(dev):
         return "Deviation not available"
-
     dev = round(dev, 2)
-
     if dev < -72:
         return f"Dev: {dev}% → Extreme issue (Data unreliable)"
     elif dev < -10:
@@ -189,30 +162,23 @@ def generate_performance_comment(dev):
         return f"Dev: {dev}% → High overperformance"
     elif dev > 2:
         return f"Dev: {dev}% → Slight overperformance"
-    else:
-        return f"Dev: {dev}% → Normal performance"
-
+    return f"Dev: {dev}% → Normal performance"
 
 def generate_pcurve_status_comment(avg_status):
     if avg_status is None or pd.isna(avg_status):
         return "PCurve status not available"
     return f"PCurveStsAve: {round(avg_status, 2)}"
 
-
 def safe_savgol(series, window=7, poly=2):
     s = series.copy()
     valid = s.notna()
-
     if valid.sum() < window:
         return s
-
     try:
         s.loc[valid] = savgol_filter(s.loc[valid], window, poly)
     except Exception:
         pass
-
     return s
-
 
 def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
     tmp = df_t[[wind_col, metric_col]].dropna().copy()
@@ -224,12 +190,10 @@ def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
 
     if smooth:
         out["AvgMetric"] = safe_savgol(out["AvgMetric"], window=7, poly=2)
-
     return out
 
-
 # =========================
-# UI HEADER
+# HEADER
 # =========================
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
@@ -239,45 +203,19 @@ with col2:
 st.title("Power Curve Analytics Report")
 
 # =========================
-# SITE CAPACITY
+# DEFAULT SITE CAPACITY
 # =========================
 DEFAULT_SITE_CAPACITY = {
     site: 3.3 for site in [
-        "CIP Hatalageri",
-        "JSW Tuljapur",
-        "Blupine Sagapara",
-        "Kalavad GJ",
-        "Kalavad_PH2",
-        "AMP_Energy",
-        "Wanki",
-        "CleanMax Motadevaliya",
-        "Ayana Amerli",
-        "Mahadev PH1",
-        "Blupine-I, Ambada-GJ",
-        "ACME Shapar",
-        "FP_Kudligi",
-        "Sprng TN",
-        "Otha Pithalpur-GJ",
-        "AMGEPL,Kurnool AP",
-        "ReNew1_Gadag",
-        "partner Ottapidaum",
-        "Cleanmax SANATHALI",
-        "Cleanmax Babra",
-        "RenfraEnergy Trichy",
-        "RENEW-03 Sholapur",
-        "Renew2 Chandwad",
-        "ReNew-4 Patoda",
-        "Clean max Jagalur",
-        "Sembcorp Tuticorin",
-        "Renew-4 Kudligi",
-        "Renew Otha",
-        "Cleanmax Honavad",
-        "Blueleaf Agar",
-        "JSW_Sandur",
-        "India_Hero_Doni",
+        "CIP Hatalageri","JSW Tuljapur","Blupine Sagapara","Kalavad GJ","Kalavad_PH2",
+        "AMP_Energy","Wanki","CleanMax Motadevaliya","Ayana Amerli","Mahadev PH1",
+        "Blupine-I, Ambada-GJ","ACME Shapar","FP_Kudligi","Sprng TN","Otha Pithalpur-GJ",
+        "AMGEPL,Kurnool AP","ReNew1_Gadag","partner Ottapidaum","Cleanmax SANATHALI",
+        "Cleanmax Babra","RenfraEnergy Trichy","RENEW-03 Sholapur","Renew2 Chandwad",
+        "ReNew-4 Patoda","Clean max Jagalur","Sembcorp Tuticorin","Renew-4 Kudligi",
+        "Renew Otha","Cleanmax Honavad","Blueleaf Agar","JSW_Sandur","India_Hero_Doni",
     ]
 }
-
 
 @st.cache_data
 def load_site_capacity():
@@ -285,15 +223,9 @@ def load_site_capacity():
     path = get_site_master_path()
     if path is None:
         return capacity
-
     try:
-        if path.lower().endswith(".csv"):
-            sm = pd.read_csv(path)
-        else:
-            sm = pd.read_excel(path)
-
+        sm = pd.read_csv(path) if path.lower().endswith(".csv") else pd.read_excel(path)
         sm.columns = [c.strip() for c in sm.columns]
-
         site_col = None
         cap_col = None
         for c in sm.columns:
@@ -301,26 +233,20 @@ def load_site_capacity():
                 site_col = c
             if c.lower() in ["capacity_mw", "capacity", "turbine_capacity_mw", "mw"]:
                 cap_col = c
-
         if site_col is None or cap_col is None:
             st.warning("site_master file found but columns not recognized. Required: Site + Capacity_MW.")
             return capacity
-
         sm = sm[[site_col, cap_col]].dropna()
         sm[site_col] = sm[site_col].astype(str).str.strip()
         sm[cap_col] = pd.to_numeric(sm[cap_col], errors="coerce")
         sm = sm.dropna()
-
         for _, row in sm.iterrows():
             capacity[row[site_col]] = float(row[cap_col])
-
         return capacity
-
     except Exception as e:
         st.warning("Failed to read site_master. Using default site list.")
         st.code(str(e))
         return capacity
-
 
 SITE_CAPACITY = load_site_capacity()
 
@@ -351,7 +277,6 @@ tab_dashboard, tab_admin = st.tabs(["Dashboard", "Site Add-on"])
 with tab_admin:
     st.subheader("Site Add-on")
     st.divider()
-
     st.markdown("## 1) Reference Excel (reference.xlsx)")
 
     if os.path.exists(REF_FILE_PATH):
@@ -359,12 +284,7 @@ with tab_admin:
     else:
         st.warning("Reference file missing. Upload a reference Excel to enable power curve reference comparison.")
 
-    ref_upload = st.file_uploader(
-        "Upload / Replace Reference Excel (.xlsx)",
-        type=["xlsx"],
-        key="ref_upload"
-    )
-
+    ref_upload = st.file_uploader("Upload / Replace Reference Excel (.xlsx)", type=["xlsx"], key="ref_upload")
     c1, c2 = st.columns(2)
 
     with c1:
@@ -404,11 +324,7 @@ with tab_dashboard:
         st.stop()
 
     site = st.sidebar.selectbox("Select Site", list(SITE_CAPACITY.keys()), key="site_select")
-    mode = st.sidebar.radio(
-        "Select View",
-        ["Single Turbine", "Compare Turbines", "Show All Turbines"],
-        key="mode_radio"
-    )
+    mode = st.sidebar.radio("Select View", ["Single Turbine", "Compare Turbines", "Show All Turbines"], key="mode_radio")
 
     @st.cache_data(show_spinner=True)
     def load_scada(file):
@@ -438,31 +354,12 @@ with tab_dashboard:
     auto_pcurve = detect_column(available_columns, ["PCurveStsAve"])
 
     st.sidebar.markdown("### Column Mapping")
-
-    time_col = st.sidebar.selectbox(
-        "Time Column", available_columns,
-        index=available_columns.index(auto_time) if auto_time in available_columns else 0
-    )
-    wind_col = st.sidebar.selectbox(
-        "Wind Column", available_columns,
-        index=available_columns.index(auto_wind) if auto_wind in available_columns else 0
-    )
-    power_col = st.sidebar.selectbox(
-        "Power Column", available_columns,
-        index=available_columns.index(auto_power) if auto_power in available_columns else 0
-    )
-    pitch_col = st.sidebar.selectbox(
-        "Pitch Column", available_columns,
-        index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0
-    )
-    nacelle_col = st.sidebar.selectbox(
-        "Nacelle Column", available_columns,
-        index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0
-    )
-    pcurve_status_col = st.sidebar.selectbox(
-        "PCurve Status Column", available_columns,
-        index=available_columns.index(auto_pcurve) if auto_pcurve in available_columns else 0
-    )
+    time_col = st.sidebar.selectbox("Time Column", available_columns, index=available_columns.index(auto_time) if auto_time in available_columns else 0)
+    wind_col = st.sidebar.selectbox("Wind Column", available_columns, index=available_columns.index(auto_wind) if auto_wind in available_columns else 0)
+    power_col = st.sidebar.selectbox("Power Column", available_columns, index=available_columns.index(auto_power) if auto_power in available_columns else 0)
+    pitch_col = st.sidebar.selectbox("Pitch Column", available_columns, index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0)
+    nacelle_col = st.sidebar.selectbox("Nacelle Column", available_columns, index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0)
+    pcurve_status_col = st.sidebar.selectbox("PCurve Status Column", available_columns, index=available_columns.index(auto_pcurve) if auto_pcurve in available_columns else 0)
 
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df[wind_col] = pd.to_numeric(df[wind_col], errors="coerce")
@@ -479,7 +376,6 @@ with tab_dashboard:
         st.stop()
 
     st.sidebar.markdown("### Date Range")
-
     max_ts = df[time_col].max()
     base_date = max_ts.normalize().date() if pd.notna(max_ts) else pd.Timestamp.today().date()
 
@@ -517,17 +413,11 @@ with tab_dashboard:
         st.stop()
 
     all_turbines = sorted(df["Name"].dropna().astype(str).str.strip().unique())
-
     num_turbines = len(all_turbines)
     capacity_per_turbine = SITE_CAPACITY.get(site, 3.3)
     total_capacity = num_turbines * capacity_per_turbine
 
-    st.subheader(
-        f"{site} | "
-        f"{num_turbines} Turbines | "
-        f"{capacity_per_turbine} MW Each | "
-        f"Total: {round(total_capacity, 2)} MW"
-    )
+    st.subheader(f"{site} | {num_turbines} Turbines | {capacity_per_turbine} MW Each | Total: {round(total_capacity, 2)} MW")
     st.markdown(f"Date Range: {start_day} → {end_day}")
 
     @st.cache_data
@@ -541,13 +431,11 @@ with tab_dashboard:
 
         site_headers = ref_raw.iloc[2].copy()
         wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
-
         normalized_site = normalize_text(site_name)
         aliases = [normalized_site] + [normalize_text(x) for x in SITE_REFERENCE_ALIASES.get(site_name, [])]
 
         matched_col = None
         matched_header = None
-
         for col_idx in range(1, ref_raw.shape[1]):
             header_text_raw = site_headers.iloc[col_idx]
             header_text = normalize_text(header_text_raw)
@@ -561,12 +449,7 @@ with tab_dashboard:
             st.stop()
 
         ref_power = pd.to_numeric(ref_raw.iloc[3:, matched_col], errors="coerce")
-
-        ref = pd.DataFrame({
-            "WindSpeed": wind_series,
-            "RefPower": ref_power
-        }).dropna()
-
+        ref = pd.DataFrame({"WindSpeed": wind_series, "RefPower": ref_power}).dropna()
         ref = ref[(ref["WindSpeed"] >= 3) & (ref["WindSpeed"] <= 25)]
 
         if ref.empty:
@@ -575,7 +458,6 @@ with tab_dashboard:
 
         wind_bins = np.arange(3, 25.5, BIN_SIZE)
         ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
-
         return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp}), matched_header
 
     ref_curve, matched_reference_name = load_reference(site)
@@ -601,7 +483,6 @@ with tab_dashboard:
             "pitch_curve": pd.DataFrame(),
             "nacelle_curve": pd.DataFrame(),
             "pcurve_curve": pd.DataFrame(),
-            "wind_curve": pd.DataFrame(),
             "avg_dev": None
         }
 
@@ -636,16 +517,12 @@ with tab_dashboard:
         result["avg_nacelle"] = df_t[nacelle_col].mean()
         result["nacelle_band"] = get_nacelle_band(result["avg_nacelle"])
         result["nacelle_comment"] = generate_nacelle_comment(result["avg_nacelle"])
-
         result["avg_pcurve_status"] = df_t[pcurve_status_col].mean()
         result["pcurve_comment"] = generate_pcurve_status_comment(result["avg_pcurve_status"])
 
         df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
 
-        power_actual = df_t.groupby("WindBin").agg(
-            AvgPower=(power_col, "mean")
-        ).reset_index()
-
+        power_actual = df_t.groupby("WindBin").agg(AvgPower=(power_col, "mean")).reset_index()
         power_curve = ref_curve.merge(power_actual, on="WindBin", how="left")
         power_curve["AvgPower"] = safe_savgol(power_curve["AvgPower"], window=7, poly=2)
         power_curve["Deviation_%"] = np.where(
@@ -657,7 +534,6 @@ with tab_dashboard:
         pitch_curve = build_metric_curve(df_t, wind_col, pitch_col, smooth=True)
         nacelle_curve = build_metric_curve(df_t, wind_col, nacelle_col, smooth=True)
         pcurve_curve = build_metric_curve(df_t, wind_col, pcurve_status_col, smooth=False)
-        wind_curve = build_metric_curve(df_t, wind_col, wind_col, smooth=True)
 
         avg_dev = power_curve["Deviation_%"].mean(skipna=True)
         if pd.isna(avg_dev):
@@ -668,7 +544,6 @@ with tab_dashboard:
         result["pitch_curve"] = pitch_curve
         result["nacelle_curve"] = nacelle_curve
         result["pcurve_curve"] = pcurve_curve
-        result["wind_curve"] = wind_curve
         result["avg_dev"] = avg_dev
 
         if avg_dev is None:
@@ -678,11 +553,7 @@ with tab_dashboard:
             result["status"] = "OK"
             result["performance_comment"] = generate_performance_comment(avg_dev)
 
-        result["comment"] = (
-            f"{result['performance_comment']} | "
-            f"{result['nacelle_comment']} | "
-            f"{result['pcurve_comment']}"
-        )
+        result["comment"] = f"{result['performance_comment']} | {result['nacelle_comment']} | {result['pcurve_comment']}"
         return result
 
     def plot_power_curve(df_t, power_curve, title, dev, avg_nacelle, avg_pcurve_status, comment):
@@ -694,16 +565,14 @@ with tab_dashboard:
 
         if not df_t.empty:
             fig.add_trace(go.Scatter(
-                x=df_t[wind_col],
-                y=df_t[power_col],
+                x=df_t[wind_col], y=df_t[power_col],
                 mode="markers",
                 marker=dict(size=4, opacity=0.30, color="rgba(30, 144, 255, 0.45)"),
                 name="Power Scatter"
             ))
 
         fig.add_trace(go.Scatter(
-            x=power_curve["WindBin"],
-            y=power_curve["RefPower"],
+            x=power_curve["WindBin"], y=power_curve["RefPower"],
             mode="lines",
             line=dict(dash="dash", width=3, color="red"),
             name="Reference Power"
@@ -711,8 +580,7 @@ with tab_dashboard:
 
         if power_curve["AvgPower"].notna().any():
             fig.add_trace(go.Scatter(
-                x=power_curve["WindBin"],
-                y=power_curve["AvgPower"],
+                x=power_curve["WindBin"], y=power_curve["AvgPower"],
                 mode="lines+markers",
                 line=dict(width=4, color="green"),
                 marker=dict(size=6, color="green"),
@@ -720,17 +588,15 @@ with tab_dashboard:
             ))
 
         fig.update_layout(
-            title=f"{title} - Graph 1: Power Curve | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}° | PCurveStsAve: {pcurve_txt}",
+            title=f"{title} - Power Curve | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}° | PCurveStsAve: {pcurve_txt}",
             xaxis_title="Wind Speed",
             yaxis_title="Power",
             height=420,
             annotations=[
                 dict(
                     text=comment,
-                    x=0.5,
-                    y=0.96,
-                    xref="paper",
-                    yref="paper",
+                    x=0.5, y=0.96,
+                    xref="paper", yref="paper",
                     showarrow=False,
                     font=dict(size=11, color="gray")
                 )
@@ -738,115 +604,31 @@ with tab_dashboard:
         )
         return fig
 
-    def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
+    def plot_metric_curve(df_t, curve_df, y_raw_col, title, y_label, line_name, color):
         fig = go.Figure()
 
         if not df_t.empty:
             fig.add_trace(go.Scatter(
-                x=df_t[wind_col],
-                y=df_t[pitch_col],
+                x=df_t[wind_col], y=df_t[y_raw_col],
                 mode="markers",
-                marker=dict(size=4, opacity=0.25, color="orange"),
-                name="Blade Pitch Scatter"
+                marker=dict(size=4, opacity=0.28, color=color),
+                name=f"{line_name} Scatter"
             ))
 
+        if not curve_df.empty and curve_df["AvgMetric"].notna().any():
             fig.add_trace(go.Scatter(
-                x=df_t[wind_col],
-                y=df_t[nacelle_col],
-                mode="markers",
-                marker=dict(size=4, opacity=0.20, color="teal"),
-                name="Nacelle Scatter",
-                yaxis="y2"
-            ))
-
-        if not pitch_curve.empty and pitch_curve["AvgMetric"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=pitch_curve["WindBin"],
-                y=pitch_curve["AvgMetric"],
+                x=curve_df["WindBin"], y=curve_df["AvgMetric"],
                 mode="lines+markers",
-                line=dict(width=3, color="orange"),
-                marker=dict(size=6, color="orange"),
-                name="Avg Blade Pitch"
-            ))
-
-        if not nacelle_curve.empty and nacelle_curve["AvgMetric"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=nacelle_curve["WindBin"],
-                y=nacelle_curve["AvgMetric"],
-                mode="lines+markers",
-                line=dict(width=3, color="teal"),
-                marker=dict(size=6, color="teal"),
-                name="Avg Nacelle Position",
-                yaxis="y2"
+                line=dict(width=3, color=color),
+                marker=dict(size=6, color=color),
+                name=line_name
             ))
 
         fig.update_layout(
-            title=f"{title} - Graph 2: Blade Pitch + Nacelle",
+            title=title,
             xaxis_title="Wind Speed",
-            yaxis=dict(title="Blade Pitch"),
-            yaxis2=dict(
-                title="Nacelle Position",
-                overlaying="y",
-                side="right",
-                showgrid=False
-            ),
-            height=420
-        )
-        return fig
-
-    def plot_pcurve_wind_curve(df_t, pcurve_curve, wind_curve, title):
-        fig = go.Figure()
-
-        if not df_t.empty:
-            fig.add_trace(go.Scatter(
-                x=df_t[wind_col],
-                y=df_t[pcurve_status_col],
-                mode="markers",
-                marker=dict(size=4, opacity=0.25, color="purple"),
-                name="PCurve Status Scatter"
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=df_t[wind_col],
-                y=df_t[wind_col],
-                mode="markers",
-                marker=dict(size=4, opacity=0.20, color="royalblue"),
-                name="Wind Scatter",
-                yaxis="y2"
-            ))
-
-        if not pcurve_curve.empty and pcurve_curve["AvgMetric"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=pcurve_curve["WindBin"],
-                y=pcurve_curve["AvgMetric"],
-                mode="lines+markers",
-                line=dict(width=3, color="purple"),
-                marker=dict(size=6, color="purple"),
-                name="Avg PCurveStsAve"
-            ))
-
-        if not wind_curve.empty and wind_curve["AvgMetric"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=wind_curve["WindBin"],
-                y=wind_curve["AvgMetric"],
-                mode="lines+markers",
-                line=dict(width=3, color="royalblue"),
-                marker=dict(size=6, color="royalblue"),
-                name="Avg Wind Speed",
-                yaxis="y2"
-            ))
-
-        fig.update_layout(
-            title=f"{title} - Graph 3: PCurve Status + Wind",
-            xaxis_title="Wind Speed",
-            yaxis=dict(title="PCurveStsAve"),
-            yaxis2=dict(
-                title="Wind Speed",
-                overlaying="y",
-                side="right",
-                showgrid=False
-            ),
-            height=420
+            yaxis_title=y_label,
+            height=360
         )
         return fig
 
@@ -869,7 +651,7 @@ with tab_dashboard:
 
         st.markdown(f"## Turbine: {t}")
 
-        fig1 = plot_power_curve(
+        fig_power = plot_power_curve(
             res["df_t"],
             res["power_curve"],
             res["turbine"],
@@ -878,33 +660,54 @@ with tab_dashboard:
             res["avg_pcurve_status"],
             res["comment"]
         )
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig_power, use_container_width=True)
 
-        col_a, col_b = st.columns(2)
+        c1, c2 = st.columns(2)
 
-        with col_a:
-            fig2 = plot_pitch_nacelle_curve(
-                res["df_t"],
-                res["pitch_curve"],
-                res["nacelle_curve"],
-                res["turbine"]
+        with c1:
+            fig_pitch = plot_metric_curve(
+                res["df_t"], res["pitch_curve"], pitch_col,
+                f"{t} - Blade Pitch Curve",
+                "Blade Pitch",
+                "Avg Blade Pitch",
+                "orange"
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig_pitch, use_container_width=True)
 
-        with col_b:
-            fig3 = plot_pcurve_wind_curve(
-                res["df_t"],
-                res["pcurve_curve"],
-                res["wind_curve"],
-                res["turbine"]
+            fig_pcurve = plot_metric_curve(
+                res["df_t"], res["pcurve_curve"], pcurve_status_col,
+                f"{t} - PCurve Status Curve",
+                "PCurveStsAve",
+                "Avg PCurveStsAve",
+                "purple"
             )
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig_pcurve, use_container_width=True)
+
+        with c2:
+            fig_nacelle = plot_metric_curve(
+                res["df_t"], res["nacelle_curve"], nacelle_col,
+                f"{t} - Nacelle Curve",
+                "Nacelle Position",
+                "Avg Nacelle Position",
+                "teal"
+            )
+            st.plotly_chart(fig_nacelle, use_container_width=True)
+
+            fig_wind = plot_metric_curve(
+                res["df_t"],
+                build_metric_curve(res["df_t"], wind_col, wind_col, smooth=True),
+                wind_col,
+                f"{t} - Wind Speed Curve",
+                "Wind Speed",
+                "Avg Wind Speed",
+                "royalblue"
+            )
+            st.plotly_chart(fig_wind, use_container_width=True)
 
         st.markdown("### Analysis")
         st.code(res["comment"])
-        st.divider()
 
-        figures.append((t, fig1, res["comment"]))
+        figures.append((t, fig_power, res["comment"]))
 
         results.append({
             "Turbine": t,
@@ -917,8 +720,9 @@ with tab_dashboard:
             "Comment": res["comment"]
         })
 
-    st.subheader("Turbine Ranking")
+        st.divider()
 
+    st.subheader("Turbine Ranking")
     results_df = pd.DataFrame(results)
 
     if not results_df.empty:
@@ -952,23 +756,19 @@ with tab_dashboard:
         pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
 
         y = height - 120
-
         for turbine, fig, comment in figures:
             if KALEIDO_AVAILABLE:
                 try:
                     img = fig.to_image(format="png")
                     img_reader = ImageReader(io.BytesIO(img))
-
                     if y < 260:
                         pdf.showPage()
                         y = height - 60
-
                     pdf.drawImage(img_reader, 30, y - 220, width=360, height=200)
                     pdf.setFont("Helvetica-Bold", 11)
                     pdf.drawString(420, y - 40, turbine)
                     pdf.setFont("Helvetica", 10)
                     pdf.drawString(420, y - 60, comment[:110])
-
                     y -= 240
                 except Exception:
                     pass
@@ -976,7 +776,6 @@ with tab_dashboard:
         pdf.showPage()
         pdf.setFont("Helvetica-Bold", 14)
         pdf.drawString(30, height - 40, "Turbine Ranking Summary")
-
         y = height - 80
         pdf.setFont("Helvetica", 10)
 
@@ -985,15 +784,9 @@ with tab_dashboard:
                 dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
                 nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
                 pcs_text = "NA" if pd.isna(row["PCurveStsAve"]) else row["PCurveStsAve"]
-
-                line = (
-                    f"{row['Turbine']} | Dev: {dev_text}% | "
-                    f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
-                    f"PCurveStsAve: {pcs_text} | {row['Status']}"
-                )
+                line = f"{row['Turbine']} | Dev: {dev_text}% | Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | PCurveStsAve: {pcs_text} | {row['Status']}"
                 pdf.drawString(40, y, line[:150])
                 y -= 20
-
                 if y < 40:
                     pdf.showPage()
                     y = height - 40
@@ -1007,7 +800,6 @@ with tab_dashboard:
             file_name="WindFarm_Full_Report.pdf",
             mime="application/pdf"
         )
-
     except Exception as e:
         st.error("PDF generation failed")
         st.code(str(e))
