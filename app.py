@@ -493,14 +493,14 @@ with tab_dashboard:
             (df_t[power_col] > 0) &
             (df_t[pitch_col] >= -5) &
             (df_t[pitch_col] <= 5)
-            (df_t[nacelle_col >= 0) &
-            (df_t[nacelle_col <= 60)&
-            (df_t[nacelle_col >= 60) &
-            (df_t[nacelle_col <= 120)&
-            (df_t[nacelle_col >= 120) &
-            (df_t[nacelle_col <= 180)&
-            (df_t[nacelle_col >= 180) &
-            (df_t[nacelle_col <= 270)
+            (df_t[nacelle_col] >= 0) &
+            (df_t[nacelle_col] <= 60)&
+            (df_t[nacelle_col] >= 60) &
+            (df_t[nacelle_col] <= 120)&
+            (df_t[nacelle_col] >= 120) &
+            (df_t[nacelle_col] <= 180)&
+            (df_t[nacelle_col] >= 180) &
+            (df_t[nacelle_col] <= 270)
         ].copy()
 
         if df_t.empty:
