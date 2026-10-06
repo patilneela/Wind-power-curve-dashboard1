@@ -19,10 +19,12 @@ st.set_page_config(layout="wide")
 def login_gate():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
     if st.session_state.authenticated:
         return
 
     st.title("Login Required")
+
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Username", key="login_username")
         password = st.text_input("Password", type="password", key="login_password")
@@ -31,12 +33,15 @@ def login_gate():
     if submitted:
         cfg = st.secrets.get("auth", {})
         ok = (username == cfg.get("username")) and (password == cfg.get("password"))
+
         if ok:
             st.session_state.authenticated = True
             st.rerun()
         else:
             st.error("Invalid username or password")
+
     st.stop()
+
 
 login_gate()
 
@@ -73,8 +78,10 @@ def get_site_master_path():
         return SITE_MASTER_CSV
     return None
 
+
 def compute_preset_range(preset: str, today_ts: pd.Timestamp):
     today_date = today_ts.normalize().date()
+
     if preset == "Today":
         return today_date, today_date
     if preset == "This Week":
@@ -95,6 +102,7 @@ def compute_preset_range(preset: str, today_ts: pd.Timestamp):
         return start, last_month_end
     return None
 
+
 def normalize_text(s):
     if pd.isna(s):
         return ""
@@ -110,19 +118,24 @@ def normalize_text(s):
         .replace(".", "")
     )
 
+
 def detect_column(columns, candidates):
     normalized_map = {c: normalize_text(c) for c in columns}
+
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         exact = [col for col, norm in normalized_map.items() if norm == candidate_norm]
         if exact:
             return exact[0]
+
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         contains = [col for col, norm in normalized_map.items() if candidate_norm in norm]
         if contains:
             return contains[0]
+
     return None
+
 
 def get_nacelle_band(avg_nacelle):
     if avg_nacelle is None or pd.isna(avg_nacelle):
@@ -137,6 +150,7 @@ def get_nacelle_band(avg_nacelle):
         return "180-270"
     return "Out of Range"
 
+
 def generate_nacelle_comment(avg_nacelle):
     if avg_nacelle is None or pd.isna(avg_nacelle):
         return "Nacelle average not available"
@@ -146,10 +160,13 @@ def generate_nacelle_comment(avg_nacelle):
         return f"NacelleAvg: {val}° → Out of configured range"
     return f"NacelleAvg: {val}° → Band {band}"
 
+
 def generate_performance_comment(dev):
     if dev is None or pd.isna(dev):
         return "Deviation not available"
+
     dev = round(dev, 2)
+
     if dev < -72:
         return f"Dev: {dev}% → Extreme issue (Data unreliable)"
     elif dev < -10:
@@ -164,33 +181,45 @@ def generate_performance_comment(dev):
         return f"Dev: {dev}% → Slight overperformance"
     return f"Dev: {dev}% → Normal performance"
 
+
 def generate_pcurve_status_comment(avg_status):
     if avg_status is None or pd.isna(avg_status):
         return "PCurve status not available"
     return f"PCurveStsAve: {round(avg_status, 2)}"
 
+
 def safe_savgol(series, window=7, poly=2):
     s = series.copy()
     valid = s.notna()
+
     if valid.sum() < window:
         return s
+
     try:
         s.loc[valid] = savgol_filter(s.loc[valid], window, poly)
     except Exception:
         pass
+
     return s
 
-def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
-    tmp = df_t[[wind_col, metric_col]].dropna().copy()
+
+def build_metric_curve(df_t, wind_column, metric_column, smooth=False):
+    if df_t.empty:
+        return pd.DataFrame(columns=["WindBin", "AvgMetric"])
+
+    tmp = df_t[[wind_column, metric_column]].dropna().copy()
+
     if tmp.empty:
         return pd.DataFrame(columns=["WindBin", "AvgMetric"])
 
-    tmp["WindBin"] = (np.floor(tmp[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
-    out = tmp.groupby("WindBin").agg(AvgMetric=(metric_col, "mean")).reset_index()
+    tmp["WindBin"] = (np.floor(tmp[wind_column] / BIN_SIZE) * BIN_SIZE).round(6)
+    out = tmp.groupby("WindBin", as_index=False).agg(AvgMetric=(metric_column, "mean"))
 
-    if smooth:
+    if smooth and not out.empty:
         out["AvgMetric"] = safe_savgol(out["AvgMetric"], window=7, poly=2)
+
     return out
+
 
 # =========================
 # HEADER
@@ -216,6 +245,7 @@ DEFAULT_SITE_CAPACITY = {
         "Renew Otha","Cleanmax Honavad","Blueleaf Agar","JSW_Sandur","India_Hero_Doni",
     ]
 }
+
 
 @st.cache_data
 def load_site_capacity():
@@ -247,6 +277,7 @@ def load_site_capacity():
         st.warning("Failed to read site_master. Using default site list.")
         st.code(str(e))
         return capacity
+
 
 SITE_CAPACITY = load_site_capacity()
 
@@ -517,14 +548,12 @@ with tab_dashboard:
         result["avg_nacelle"] = df_t[nacelle_col].mean()
         result["nacelle_band"] = get_nacelle_band(result["avg_nacelle"])
         result["nacelle_comment"] = generate_nacelle_comment(result["avg_nacelle"])
+
         result["avg_pcurve_status"] = df_t[pcurve_status_col].mean()
         result["pcurve_comment"] = generate_pcurve_status_comment(result["avg_pcurve_status"])
 
-        df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
-
-        power_actual = df_t.groupby("WindBin").agg(AvgPower=(power_col, "mean")).reset_index()
-        power_curve = ref_curve.merge(power_actual, on="WindBin", how="left")
-        power_curve["AvgPower"] = safe_savgol(power_curve["AvgPower"], window=7, poly=2)
+        power_curve = build_metric_curve(df_t, wind_col, power_col, smooth=True)
+        power_curve = ref_curve.merge(power_curve.rename(columns={"AvgMetric": "AvgPower"}), on="WindBin", how="left")
         power_curve["Deviation_%"] = np.where(
             power_curve["RefPower"] > 0,
             ((power_curve["AvgPower"] - power_curve["RefPower"]) / power_curve["RefPower"]) * 100,
@@ -565,14 +594,16 @@ with tab_dashboard:
 
         if not df_t.empty:
             fig.add_trace(go.Scatter(
-                x=df_t[wind_col], y=df_t[power_col],
+                x=df_t[wind_col],
+                y=df_t[power_col],
                 mode="markers",
                 marker=dict(size=4, opacity=0.30, color="rgba(30, 144, 255, 0.45)"),
                 name="Power Scatter"
             ))
 
         fig.add_trace(go.Scatter(
-            x=power_curve["WindBin"], y=power_curve["RefPower"],
+            x=power_curve["WindBin"],
+            y=power_curve["RefPower"],
             mode="lines",
             line=dict(dash="dash", width=3, color="red"),
             name="Reference Power"
@@ -580,7 +611,8 @@ with tab_dashboard:
 
         if power_curve["AvgPower"].notna().any():
             fig.add_trace(go.Scatter(
-                x=power_curve["WindBin"], y=power_curve["AvgPower"],
+                x=power_curve["WindBin"],
+                y=power_curve["AvgPower"],
                 mode="lines+markers",
                 line=dict(width=4, color="green"),
                 marker=dict(size=6, color="green"),
@@ -588,15 +620,17 @@ with tab_dashboard:
             ))
 
         fig.update_layout(
-            title=f"{title} - Power Curve | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}° | PCurveStsAve: {pcurve_txt}",
+            title=f"{title} - Graph 1: Power Curve | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}° | PCurveStsAve: {pcurve_txt}",
             xaxis_title="Wind Speed",
             yaxis_title="Power",
             height=420,
             annotations=[
                 dict(
                     text=comment,
-                    x=0.5, y=0.96,
-                    xref="paper", yref="paper",
+                    x=0.5,
+                    y=0.96,
+                    xref="paper",
+                    yref="paper",
                     showarrow=False,
                     font=dict(size=11, color="gray")
                 )
@@ -604,31 +638,89 @@ with tab_dashboard:
         )
         return fig
 
-    def plot_metric_curve(df_t, curve_df, y_raw_col, title, y_label, line_name, color):
+    def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
         fig = go.Figure()
 
         if not df_t.empty:
             fig.add_trace(go.Scatter(
-                x=df_t[wind_col], y=df_t[y_raw_col],
+                x=df_t[wind_col],
+                y=df_t[pitch_col],
                 mode="markers",
-                marker=dict(size=4, opacity=0.28, color=color),
-                name=f"{line_name} Scatter"
+                marker=dict(size=4, opacity=0.25, color="orange"),
+                name="Blade Pitch Scatter"
             ))
 
-        if not curve_df.empty and curve_df["AvgMetric"].notna().any():
             fig.add_trace(go.Scatter(
-                x=curve_df["WindBin"], y=curve_df["AvgMetric"],
+                x=df_t[wind_col],
+                y=df_t[nacelle_col],
+                mode="markers",
+                marker=dict(size=4, opacity=0.20, color="teal"),
+                name="Nacelle Scatter",
+                yaxis="y2"
+            ))
+
+        if not pitch_curve.empty and pitch_curve["AvgMetric"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=pitch_curve["WindBin"],
+                y=pitch_curve["AvgMetric"],
                 mode="lines+markers",
-                line=dict(width=3, color=color),
-                marker=dict(size=6, color=color),
-                name=line_name
+                line=dict(width=3, color="orange"),
+                marker=dict(size=6, color="orange"),
+                name="Avg Blade Pitch"
+            ))
+
+        if not nacelle_curve.empty and nacelle_curve["AvgMetric"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=nacelle_curve["WindBin"],
+                y=nacelle_curve["AvgMetric"],
+                mode="lines+markers",
+                line=dict(width=3, color="teal"),
+                marker=dict(size=6, color="teal"),
+                name="Avg Nacelle Position",
+                yaxis="y2"
             ))
 
         fig.update_layout(
-            title=title,
+            title=f"{title} - Graph 2: Blade Pitch + Nacelle",
             xaxis_title="Wind Speed",
-            yaxis_title=y_label,
-            height=360
+            yaxis=dict(title="Blade Pitch"),
+            yaxis2=dict(
+                title="Nacelle Position",
+                overlaying="y",
+                side="right",
+                showgrid=False
+            ),
+            height=420
+        )
+        return fig
+
+    def plot_pcurve_curve(df_t, pcurve_curve, title):
+        fig = go.Figure()
+
+        if not df_t.empty:
+            fig.add_trace(go.Scatter(
+                x=df_t[wind_col],
+                y=df_t[pcurve_status_col],
+                mode="markers",
+                marker=dict(size=4, opacity=0.25, color="purple"),
+                name="PCurve Status Scatter"
+            ))
+
+        if not pcurve_curve.empty and pcurve_curve["AvgMetric"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=pcurve_curve["WindBin"],
+                y=pcurve_curve["AvgMetric"],
+                mode="lines+markers",
+                line=dict(width=3, color="purple"),
+                marker=dict(size=6, color="purple"),
+                name="Avg PCurveStsAve"
+            ))
+
+        fig.update_layout(
+            title=f"{title} - Graph 3: PCurve Status Curve",
+            xaxis_title="Wind Speed",
+            yaxis_title="PCurveStsAve",
+            height=420
         )
         return fig
 
@@ -651,7 +743,7 @@ with tab_dashboard:
 
         st.markdown(f"## Turbine: {t}")
 
-        fig_power = plot_power_curve(
+        fig1 = plot_power_curve(
             res["df_t"],
             res["power_curve"],
             res["turbine"],
@@ -660,54 +752,32 @@ with tab_dashboard:
             res["avg_pcurve_status"],
             res["comment"]
         )
-        st.plotly_chart(fig_power, use_container_width=True)
+        st.plotly_chart(fig1, use_container_width=True)
 
-        c1, c2 = st.columns(2)
+        col_a, col_b = st.columns(2)
 
-        with c1:
-            fig_pitch = plot_metric_curve(
-                res["df_t"], res["pitch_curve"], pitch_col,
-                f"{t} - Blade Pitch Curve",
-                "Blade Pitch",
-                "Avg Blade Pitch",
-                "orange"
-            )
-            st.plotly_chart(fig_pitch, use_container_width=True)
-
-            fig_pcurve = plot_metric_curve(
-                res["df_t"], res["pcurve_curve"], pcurve_status_col,
-                f"{t} - PCurve Status Curve",
-                "PCurveStsAve",
-                "Avg PCurveStsAve",
-                "purple"
-            )
-            st.plotly_chart(fig_pcurve, use_container_width=True)
-
-        with c2:
-            fig_nacelle = plot_metric_curve(
-                res["df_t"], res["nacelle_curve"], nacelle_col,
-                f"{t} - Nacelle Curve",
-                "Nacelle Position",
-                "Avg Nacelle Position",
-                "teal"
-            )
-            st.plotly_chart(fig_nacelle, use_container_width=True)
-
-            fig_wind = plot_metric_curve(
+        with col_a:
+            fig2 = plot_pitch_nacelle_curve(
                 res["df_t"],
-                build_metric_curve(res["df_t"], wind_col, wind_col, smooth=True),
-                wind_col,
-                f"{t} - Wind Speed Curve",
-                "Wind Speed",
-                "Avg Wind Speed",
-                "royalblue"
+                res["pitch_curve"],
+                res["nacelle_curve"],
+                res["turbine"]
             )
-            st.plotly_chart(fig_wind, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True)
+
+        with col_b:
+            fig3 = plot_pcurve_curve(
+                res["df_t"],
+                res["pcurve_curve"],
+                res["turbine"]
+            )
+            st.plotly_chart(fig3, use_container_width=True)
 
         st.markdown("### Analysis")
         st.code(res["comment"])
+        st.divider()
 
-        figures.append((t, fig_power, res["comment"]))
+        figures.append((t, fig1, res["comment"]))
 
         results.append({
             "Turbine": t,
@@ -719,8 +789,6 @@ with tab_dashboard:
             "Rows": res["raw_rows"],
             "Comment": res["comment"]
         })
-
-        st.divider()
 
     st.subheader("Turbine Ranking")
     results_df = pd.DataFrame(results)
