@@ -141,27 +141,48 @@ def get_nacelle_band(avg_nacelle):
         return "120-180"
     elif 180 <= avg_nacelle <= 270:
         return "180-270"
-    else:
-        return "Out of Range"
+    return "Out of Range"
 
 
 def generate_nacelle_comment(avg_nacelle):
     if avg_nacelle is None or pd.isna(avg_nacelle):
-        return "NacelleAvg: NA → Nacelle average not available"
+        return "Nacelle average not available"
 
     band = get_nacelle_band(avg_nacelle)
     val = round(avg_nacelle, 2)
 
-    if band == "0-60":
-        return f"NacelleAvg: {val}° → Band 0-60"
-    elif band == "60-120":
-        return f"NacelleAvg: {val}° → Band 60-120"
-    elif band == "120-180":
-        return f"NacelleAvg: {val}° → Band 120-180"
-    elif band == "180-270":
-        return f"NacelleAvg: {val}° → Band 180-270"
-    else:
-        return f"NacelleAvg: {val}° → Out of configured nacelle bands"
+    if band == "Out of Range":
+        return f"NacelleAvg: {val}° → Out of configured range"
+    return f"NacelleAvg: {val}° → Band {band}"
+
+
+def generate_performance_comment(dev):
+    if dev is None or pd.isna(dev):
+        return "Deviation not available"
+
+    dev = round(dev, 2)
+
+    if dev < -72:
+        return f"Dev: {dev}% → Extreme issue (Data unreliable)"
+    elif dev < -10:
+        return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
+    elif dev < -2:
+        return f"Dev: {dev}% → Underperformance (Control/availability)"
+    elif dev > 72:
+        return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
+    elif dev > 8:
+        return f"Dev: {dev}% → High overperformance"
+    elif dev > 2:
+        return f"Dev: {dev}% → Slight overperformance"
+    return f"Dev: {dev}% → Normal performance"
+
+
+def generate_pcurve_status_comment(avg_status):
+    if avg_status is None or pd.isna(avg_status):
+        return "PCurve status not available"
+
+    avg_status = round(avg_status, 2)
+    return f"PCurveStsAve: {avg_status}"
 
 
 def safe_savgol(series, window=7, poly=2):
@@ -382,11 +403,7 @@ with tab_dashboard:
         st.stop()
 
     site = st.sidebar.selectbox("Select Site", list(SITE_CAPACITY.keys()), key="site_select")
-    mode = st.sidebar.radio(
-        "Select View",
-        ["Single Turbine", "Compare Turbines", "Show All Turbines"],
-        key="mode_radio"
-    )
+    mode = st.sidebar.radio("Select View", ["Single Turbine", "Compare Turbines", "Show All Turbines"], key="mode_radio")
 
     @st.cache_data(show_spinner=True)
     def load_scada(file):
@@ -399,26 +416,12 @@ with tab_dashboard:
             st.error("SCADA CSV must contain a 'Name' column for turbine identifier.")
             st.stop()
 
-        wind_col = detect_column(
-            df_local.columns,
-            ["WindSpeedAve", "Wind Speed Ave", "WindSpeed", "Wind"]
-        )
-        power_col = detect_column(
-            df_local.columns,
-            ["PowerAve", "ActivePowerAve", "Power", "Active Power"]
-        )
-        time_col = detect_column(
-            df_local.columns,
-            ["Time", "Timestamp", "DateTime", "LocalTime"]
-        )
-        pitch_col = detect_column(
-            df_local.columns,
-            ["BladePitchAve", "PitchAve", "Blade Pitch Ave", "Pitch"]
-        )
-        nacelle_col = detect_column(
-            df_local.columns,
-            ["NacelleAve", "NacellePositionAve", "Nacelle", "Nacelle Position"]
-        )
+        wind_col = detect_column(df_local.columns, ["WindSpeedAve"])
+        power_col = detect_column(df_local.columns, ["PowerAve", "ActivePowerAve", "Power"])
+        time_col = detect_column(df_local.columns, ["Time", "Timestamp", "DateTime", "LocalTime"])
+        pitch_col = detect_column(df_local.columns, ["BladePitchAve"])
+        nacelle_col = detect_column(df_local.columns, ["NacellePositionAve"])
+        pcurve_status_col = detect_column(df_local.columns, ["PCurveStsAve"])
 
         missing = []
         if wind_col is None:
@@ -430,7 +433,9 @@ with tab_dashboard:
         if pitch_col is None:
             missing.append("BladePitchAve")
         if nacelle_col is None:
-            missing.append("NacelleAve")
+            missing.append("NacellePositionAve")
+        if pcurve_status_col is None:
+            missing.append("PCurveStsAve")
 
         if missing:
             st.error(f"Required SCADA columns not found: {', '.join(missing)}")
@@ -443,12 +448,13 @@ with tab_dashboard:
         df_local[power_col] = pd.to_numeric(df_local[power_col], errors="coerce")
         df_local[pitch_col] = pd.to_numeric(df_local[pitch_col], errors="coerce")
         df_local[nacelle_col] = pd.to_numeric(df_local[nacelle_col], errors="coerce")
+        df_local[pcurve_status_col] = pd.to_numeric(df_local[pcurve_status_col], errors="coerce")
         df_local["Name"] = df_local["Name"].astype(str).str.strip()
 
-        return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col
+        return df_local, wind_col, power_col, time_col, pitch_col, nacelle_col, pcurve_status_col
 
     with st.spinner("Loading SCADA file..."):
-        df, wind_col, power_col, time_col, pitch_col, nacelle_col = load_scada(uploaded_file)
+        df, wind_col, power_col, time_col, pitch_col, nacelle_col, pcurve_status_col = load_scada(uploaded_file)
 
     df = df.dropna(subset=["Name"])
 
@@ -560,27 +566,6 @@ with tab_dashboard:
     ref_curve, matched_reference_name = load_reference(site)
     st.caption(f"Matched Reference Curve: {matched_reference_name}")
 
-    def generate_performance_comment(dev):
-        if dev is None or pd.isna(dev):
-            return "Deviation not available"
-
-        dev = round(dev, 2)
-
-        if dev < -72:
-            return f"Dev: {dev}% → Extreme issue (Data unreliable)"
-        elif dev < -10:
-            return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
-        elif dev < -2:
-            return f"Dev: {dev}% → Underperformance (Control/availability)"
-        elif dev > 72:
-            return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
-        elif dev > 8:
-            return f"Dev: {dev}% → High overperformance"
-        elif dev > 2:
-            return f"Dev: {dev}% → Slight overperformance"
-        else:
-            return f"Dev: {dev}% → Normal performance"
-
     def process_turbine(t):
         df_t_all = df[df["Name"] == t].copy()
         raw_rows = len(df_t_all)
@@ -591,10 +576,12 @@ with tab_dashboard:
             "status": "No Data",
             "comment": "No data available for this turbine in selected range.",
             "performance_comment": "Deviation not available",
-            "nacelle_comment": "NacelleAvg: NA → Nacelle average not available",
+            "nacelle_comment": "Nacelle average not available",
+            "pcurve_comment": "PCurve status not available",
             "avg_nacelle": None,
+            "avg_pcurve_status": None,
             "nacelle_band": "NA",
-            "df_t": pd.DataFrame(columns=[wind_col, power_col, pitch_col, nacelle_col]),
+            "df_t": pd.DataFrame(columns=[wind_col, power_col, pitch_col, nacelle_col, pcurve_status_col]),
             "merged": ref_curve.copy(),
             "avg_dev": None
         }
@@ -605,14 +592,16 @@ with tab_dashboard:
         if raw_rows == 0:
             return result
 
-        df_t = df_t_all.dropna(subset=[wind_col, power_col, pitch_col, nacelle_col]).copy()
+        df_t = df_t_all.dropna(
+            subset=[wind_col, power_col, pitch_col, nacelle_col, pcurve_status_col]
+        ).copy()
 
         if df_t.empty:
             result["status"] = "No Valid Data"
-            result["comment"] = "Rows exist, but wind/power/pitch/nacelle values are missing."
+            result["comment"] = "Rows exist, but required values are missing."
             return result
 
-        # Main quality filter
+        # Quality filter
         df_t = df_t[
             (df_t[wind_col] >= 3) &
             (df_t[wind_col] <= 25) &
@@ -620,7 +609,8 @@ with tab_dashboard:
             (df_t[pitch_col] >= -5) &
             (df_t[pitch_col] <= 5) &
             (df_t[nacelle_col] >= 0) &
-            (df_t[nacelle_col] <= 270)
+            (df_t[nacelle_col] <= 270) &
+            (df_t[pcurve_status_col] >= 0)
         ].copy()
 
         if df_t.empty:
@@ -631,6 +621,9 @@ with tab_dashboard:
         result["avg_nacelle"] = df_t[nacelle_col].mean()
         result["nacelle_band"] = get_nacelle_band(result["avg_nacelle"])
         result["nacelle_comment"] = generate_nacelle_comment(result["avg_nacelle"])
+
+        result["avg_pcurve_status"] = df_t[pcurve_status_col].mean()
+        result["pcurve_comment"] = generate_pcurve_status_comment(result["avg_pcurve_status"])
 
         df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
 
@@ -663,14 +656,20 @@ with tab_dashboard:
             result["status"] = "OK"
             result["performance_comment"] = generate_performance_comment(avg_dev)
 
-        result["comment"] = f"{result['performance_comment']} | {result['nacelle_comment']}"
+        result["comment"] = (
+            f"{result['performance_comment']} | "
+            f"{result['nacelle_comment']} | "
+            f"{result['pcurve_comment']}"
+        )
         return result
 
-    def plot_graph(df_t, merged, title, dev, avg_nacelle, nacelle_comment, perf_comment):
+    def plot_graph(df_t, merged, title, dev, avg_nacelle, avg_pcurve_status, nacelle_comment, perf_comment, pcurve_comment):
         safe_dev = 0 if dev is None or pd.isna(dev) else dev
         title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
+
         dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
         nacelle_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
+        pcurve_txt = "NA" if avg_pcurve_status is None or pd.isna(avg_pcurve_status) else round(avg_pcurve_status, 2)
 
         fig = go.Figure()
 
@@ -710,7 +709,7 @@ with tab_dashboard:
                 name="Actual Avg Power"
             ))
 
-        if "AvgPitch" in merged.columns and merged["AvgPitch"].notna().any():
+        if merged["AvgPitch"].notna().any():
             fig.add_trace(go.Scatter(
                 x=merged["WindBin"],
                 y=merged["AvgPitch"],
@@ -723,7 +722,7 @@ with tab_dashboard:
 
         fig.update_layout(
             title=dict(
-                text=f"{title} | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}°",
+                text=f"{title} | Dev: {dev_txt}% | NacelleAvg: {nacelle_txt}° | PCurveStsAve: {pcurve_txt}",
                 font=dict(color=title_color)
             ),
             xaxis=dict(title="Wind Speed"),
@@ -734,13 +733,13 @@ with tab_dashboard:
                 side="right",
                 showgrid=False
             ),
-            height=560,
+            height=580,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             annotations=[
                 dict(
                     text=perf_comment,
                     x=0.5,
-                    y=0.96,
+                    y=0.97,
                     xref="paper",
                     yref="paper",
                     showarrow=False,
@@ -749,7 +748,16 @@ with tab_dashboard:
                 dict(
                     text=nacelle_comment,
                     x=0.5,
-                    y=0.91,
+                    y=0.92,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                    font=dict(size=12, color="gray")
+                ),
+                dict(
+                    text=pcurve_comment,
+                    x=0.5,
+                    y=0.87,
                     xref="paper",
                     yref="paper",
                     showarrow=False,
@@ -763,12 +771,7 @@ with tab_dashboard:
     if mode == "Single Turbine":
         turbines_to_show = [st.sidebar.selectbox("Select Turbine", all_turbines, key="single_turbine")]
     elif mode == "Compare Turbines":
-        turbines_to_show = st.sidebar.multiselect(
-            "Select Turbines",
-            all_turbines,
-            default=all_turbines,
-            key="compare_turbines"
-        )
+        turbines_to_show = st.sidebar.multiselect("Select Turbines", all_turbines, default=all_turbines, key="compare_turbines")
     else:
         turbines_to_show = all_turbines
 
@@ -790,8 +793,10 @@ with tab_dashboard:
                 res["turbine"],
                 res["avg_dev"],
                 res["avg_nacelle"],
+                res["avg_pcurve_status"],
                 res["nacelle_comment"],
-                res["performance_comment"]
+                res["performance_comment"],
+                res["pcurve_comment"]
             )
             st.plotly_chart(fig, use_container_width=True)
             st.markdown("### Analysis")
@@ -804,6 +809,7 @@ with tab_dashboard:
             "Deviation_%": None if res["avg_dev"] is None else round(res["avg_dev"], 2),
             "Avg_Nacelle": None if res["avg_nacelle"] is None else round(res["avg_nacelle"], 2),
             "Nacelle_Band": res["nacelle_band"],
+            "PCurveStsAve": None if res["avg_pcurve_status"] is None else round(res["avg_pcurve_status"], 2),
             "Status": res["status"],
             "Rows": res["raw_rows"],
             "Comment": res["comment"]
@@ -827,8 +833,7 @@ with tab_dashboard:
                 return ['background-color: #f2f2f2'] * len(row)
             elif row["Status"] == "No Data":
                 return ['background-color: #f2f2f2'] * len(row)
-            else:
-                return ['background-color: #cccccc'] * len(row)
+            return ['background-color: #cccccc'] * len(row)
 
         styled_table = results_df.style.apply(color_row, axis=1)
         st.dataframe(styled_table, use_container_width=True)
@@ -864,9 +869,7 @@ with tab_dashboard:
                     pdf.setFont("Helvetica-Bold", 11)
                     pdf.drawString(420, y - 40, turbine)
                     pdf.setFont("Helvetica", 10)
-
-                    wrapped_comment = comment[:110]
-                    pdf.drawString(420, y - 60, wrapped_comment)
+                    pdf.drawString(420, y - 60, comment[:110])
 
                     y -= 240
                 except Exception:
@@ -883,7 +886,13 @@ with tab_dashboard:
             for _, row in results_df.iterrows():
                 dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
                 nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
-                line = f"{row['Turbine']} | Dev: {dev_text}% | Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | {row['Status']}"
+                pcs_text = "NA" if pd.isna(row["PCurveStsAve"]) else row["PCurveStsAve"]
+
+                line = (
+                    f"{row['Turbine']} | Dev: {dev_text}% | "
+                    f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
+                    f"PCurveStsAve: {pcs_text} | {row['Status']}"
+                )
                 pdf.drawString(40, y, line[:150])
                 y -= 20
 
