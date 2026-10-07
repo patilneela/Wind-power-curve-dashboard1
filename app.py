@@ -142,7 +142,7 @@ def get_nacelle_band(avg_nacelle):
         return "60-120"
     elif 120 <= avg_nacelle < 180:
         return "120-180"
-    elif 180 <= avg_nacelle < 270:
+    elif 180 <= avg_nacelle <= 270:
         return "180-270"
     else:
         return "Out of Range"
@@ -237,7 +237,7 @@ available_columns = list(df.columns)
 auto_time = detect_column(available_columns, ["Time", "Timestamp", "DateTime", "LocalTime"])
 auto_wind = detect_column(available_columns, ["WindSpeedAve"])
 auto_power = detect_column(available_columns, [
-    "PowerAve", "ActivePowerAve", "ActivePower", "Power",
+    "ActivePWAve", "ActivePowerAve", "PowerAve", "ActivePower", "Power",
     "GrdProdPwrAve", "GrdProdPwrAct", "WTGActivePowerAve", "OutputPowerAve"
 ])
 auto_pitch = detect_column(available_columns, ["BladePitchAve"])
@@ -245,16 +245,31 @@ auto_nacelle = detect_column(available_columns, ["NacellePositionAve"])
 
 st.sidebar.markdown("### Column Mapping")
 
-time_col = st.sidebar.selectbox("Time Column", available_columns,
-    index=available_columns.index(auto_time) if auto_time in available_columns else 0)
-wind_col = st.sidebar.selectbox("Wind Column", available_columns,
-    index=available_columns.index(auto_wind) if auto_wind in available_columns else 0)
-power_col = st.sidebar.selectbox("Power Column", available_columns,
-    index=available_columns.index(auto_power) if auto_power in available_columns else 0)
-pitch_col = st.sidebar.selectbox("Pitch Column", available_columns,
-    index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0)
-nacelle_col = st.sidebar.selectbox("Nacelle Column", available_columns,
-    index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0)
+time_col = st.sidebar.selectbox(
+    "Time Column",
+    available_columns,
+    index=available_columns.index(auto_time) if auto_time in available_columns else 0
+)
+wind_col = st.sidebar.selectbox(
+    "Wind Column",
+    available_columns,
+    index=available_columns.index(auto_wind) if auto_wind in available_columns else 0
+)
+power_col = st.sidebar.selectbox(
+    "Power Column",
+    available_columns,
+    index=available_columns.index(auto_power) if auto_power in available_columns else 0
+)
+pitch_col = st.sidebar.selectbox(
+    "Pitch Column",
+    available_columns,
+    index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0
+)
+nacelle_col = st.sidebar.selectbox(
+    "Nacelle Column",
+    available_columns,
+    index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0
+)
 
 df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
 df[wind_col] = pd.to_numeric(df[wind_col], errors="coerce")
@@ -314,7 +329,11 @@ if df.empty:
 # =========================
 all_turbines = sorted(df["Name"].dropna().unique())
 
-mode = st.sidebar.radio("Select View", ["Single Turbine", "Compare Turbines", "Show All Turbines"], key="mode_radio")
+mode = st.sidebar.radio(
+    "Select View",
+    ["Single Turbine", "Compare Turbines", "Show All Turbines"],
+    key="mode_radio"
+)
 
 if mode == "Single Turbine":
     turbines_to_show = [st.sidebar.selectbox("Select Turbine", all_turbines, key="single_turbine")]
@@ -470,7 +489,7 @@ def process_turbine(t):
 
     if avg_dev is None:
         result["status"] = "Low Data"
-        result["comment"] = "Insufficient overlap with reference"
+        result["comment"] = f"Insufficient overlap with reference | {nacelle_comment}"
     else:
         result["status"] = "OK"
         result["comment"] = f"{generate_comment(avg_dev)} | {nacelle_comment}"
@@ -480,7 +499,7 @@ def process_turbine(t):
 # =========================
 # PLOT
 # =========================
-def plot_graph(df_t, merged, title, dev, comment):
+def plot_power_curve(df_t, merged, title, dev, comment):
     safe_dev = 0 if dev is None or pd.isna(dev) else dev
     title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
 
@@ -492,7 +511,7 @@ def plot_graph(df_t, merged, title, dev, comment):
             y=df_t[power_col],
             mode="markers",
             marker=dict(size=4, opacity=0.30, color="rgba(30, 144, 255, 0.55)"),
-            name="Scatter Points"
+            name="Actual Scatter"
         ))
 
     fig.add_trace(go.Scatter(
@@ -500,7 +519,7 @@ def plot_graph(df_t, merged, title, dev, comment):
         y=merged["RefPower"],
         mode="lines",
         line=dict(dash="dash", width=3, color="red"),
-        name="Reference"
+        name="Reference Power"
     ))
 
     if merged["AvgPower"].notna().any():
@@ -510,7 +529,7 @@ def plot_graph(df_t, merged, title, dev, comment):
             mode="lines+markers",
             line=dict(width=4, color="green"),
             marker=dict(size=6, color="green"),
-            name="Actual"
+            name="Actual Avg Power"
         ))
 
     dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
@@ -522,7 +541,7 @@ def plot_graph(df_t, merged, title, dev, comment):
         ),
         xaxis_title="Wind Speed",
         yaxis_title="Power",
-        height=420,
+        height=480,
         annotations=[
             dict(
                 text=comment,
@@ -537,35 +556,18 @@ def plot_graph(df_t, merged, title, dev, comment):
     )
     return fig
 
-def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
+def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
+    nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
+
     fig = go.Figure()
 
     if not df_t.empty:
         fig.add_trace(go.Scatter(
             x=df_t[wind_col],
-            y=df_t[pitch_col],
-            mode="markers",
-            marker=dict(size=4, opacity=0.25, color="orange"),
-            name="Blade Pitch Scatter"
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=df_t[wind_col],
             y=df_t[nacelle_col],
             mode="markers",
-            marker=dict(size=4, opacity=0.20, color="teal"),
-            name="Nacelle Scatter",
-            yaxis="y2"
-        ))
-
-    if (not pitch_curve.empty) and pitch_curve["AvgMetric"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=pitch_curve["WindBin"],
-            y=pitch_curve["AvgMetric"],
-            mode="lines+markers",
-            line=dict(width=3, color="orange"),
-            marker=dict(size=6, color="orange"),
-            name="Avg Blade Pitch"
+            marker=dict(size=4, opacity=0.25, color="teal"),
+            name="Nacelle Scatter"
         ))
 
     if (not nacelle_curve.empty) and nacelle_curve["AvgMetric"].notna().any():
@@ -575,21 +577,14 @@ def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
             mode="lines+markers",
             line=dict(width=3, color="teal"),
             marker=dict(size=6, color="teal"),
-            name="Avg Nacelle Position",
-            yaxis="y2"
+            name="Avg Nacelle Position"
         ))
 
     fig.update_layout(
-        title=f"{title} - Blade Pitch & Nacelle",
+        title=f"{title} - Nacelle Curve | Avg Nacelle: {nac_txt}°",
         xaxis_title="Wind Speed",
-        yaxis=dict(title="Blade Pitch"),
-        yaxis2=dict(
-            title="Nacelle Position",
-            overlaying="y",
-            side="right",
-            showgrid=False
-        ),
-        height=420
+        yaxis_title="Nacelle Position",
+        height=480
     )
     return fig
 
@@ -598,33 +593,37 @@ def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
 # =========================
 results = []
 figures = []
-cols = st.columns(2)
 
-for i, t in enumerate(turbines_to_show):
+for t in turbines_to_show:
     res = process_turbine(t)
 
-    with cols[i % 2]:
-        fig = plot_graph(
+    st.markdown(f"## Turbine: {t}")
+    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Graph"])
+
+    with tab1:
+        fig_power = plot_power_curve(
             res["df_t"],
             res["merged"],
             res["turbine"],
             res["avg_dev"],
             res["comment"]
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_power, use_container_width=True)
 
-        fig2 = plot_pitch_nacelle_curve(
+    with tab2:
+        fig_nacelle = plot_nacelle_graph(
             res["df_t"],
-            res["pitch_curve"],
             res["nacelle_curve"],
-            res["turbine"]
+            res["turbine"],
+            res["avg_nacelle"]
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig_nacelle, use_container_width=True)
 
-        st.markdown("### Analysis")
-        st.code(res["comment"])
+    st.markdown("### Analysis")
+    st.code(res["comment"])
+    st.divider()
 
-    figures.append((t, fig, res["comment"]))
+    figures.append((t, fig_power, res["comment"]))
 
     results.append({
         "Turbine": t,
