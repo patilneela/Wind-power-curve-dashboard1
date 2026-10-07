@@ -84,14 +84,12 @@ def normalize_text(s):
 def detect_column(columns, candidates):
     normalized_map = {c: normalize_text(c) for c in columns}
 
-    # exact normalized match first
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         exact = [col for col, norm in normalized_map.items() if norm == candidate_norm]
         if exact:
             return exact[0]
 
-    # contains match second
     for candidate in candidates:
         candidate_norm = normalize_text(candidate)
         contains = [col for col, norm in normalized_map.items() if candidate_norm in norm]
@@ -126,15 +124,12 @@ def compute_preset_range(preset: str, today_ts: pd.Timestamp):
 def safe_savgol(series, window=7, poly=2):
     s = series.copy()
     valid = s.notna()
-
     if valid.sum() < window:
         return s
-
     try:
         s.loc[valid] = savgol_filter(s.loc[valid], window, poly)
     except Exception:
         pass
-
     return s
 
 def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
@@ -160,8 +155,10 @@ def get_nacelle_band(avg_nacelle):
         return "60-120"
     elif 120 <= avg_nacelle < 180:
         return "120-180"
-    elif 180 <= avg_nacelle <= 270:
-        return "180-270"
+    elif 180 <= avg_nacelle < 240:
+        return "180-240"
+    elif 240 <= avg_nacelle <= 360:
+        return "240-360"
     return "Out of Range"
 
 def generate_nacelle_comment(avg_nacelle):
@@ -193,6 +190,21 @@ def generate_comment(dev):
         return f"Dev: {dev}% → Slight overperformance"
     else:
         return f"Dev: {dev}% → Normal performance"
+
+def get_nacelle_color_band(value):
+    if pd.isna(value):
+        return "Unknown"
+    if 0 <= value < 60:
+        return "0-60"
+    elif 60 <= value < 120:
+        return "60-120"
+    elif 120 <= value < 180:
+        return "120-180"
+    elif 180 <= value < 240:
+        return "180-240"
+    elif 240 <= value <= 360:
+        return "240-360"
+    return "Out of Range"
 
 # =========================
 # UI HEADER
@@ -414,7 +426,7 @@ st.sidebar.markdown("### Filters")
 pitch_min = st.sidebar.number_input("Pitch Min", value=-5.0)
 pitch_max = st.sidebar.number_input("Pitch Max", value=5.0)
 nacelle_min = st.sidebar.number_input("Nacelle Min", value=0.0)
-nacelle_max = st.sidebar.number_input("Nacelle Max", value=270.0)
+nacelle_max = st.sidebar.number_input("Nacelle Max", value=360.0)
 wind_min = st.sidebar.number_input("Wind Min", value=3.0)
 wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 
@@ -521,19 +533,35 @@ def plot_power_curve(df_t, merged, title, dev, comment):
 
     fig = go.Figure()
 
-    if not df_t.empty:
-        fig.add_trace(go.Scatter(
-            x=df_t[wind_col],
-            y=df_t[power_col],
-            mode="markers",
-            marker=dict(
-                size=7,
-                opacity=0.75,
-                color="#1296db",
-                line=dict(width=0.3, color="#0b6fa4")
-            ),
-            name="Power Samples"
-        ))
+    if not df_t.empty and nacelle_col in df_t.columns:
+        df_plot = df_t.copy()
+        df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
+
+        band_colors = {
+            "0-60": "green",
+            "60-120": "darkgreen",
+            "120-180": "orange",
+            "180-240": "#ff7f7f",
+            "240-360": "red"
+        }
+
+        band_order = ["0-60", "60-120", "120-180", "180-240", "240-360"]
+
+        for band in band_order:
+            band_df = df_plot[df_plot["NacelleBand"] == band]
+            if not band_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=band_df[wind_col],
+                    y=band_df[power_col],
+                    mode="markers",
+                    marker=dict(
+                        size=7,
+                        opacity=0.75,
+                        color=band_colors[band],
+                        line=dict(width=0.3, color=band_colors[band])
+                    ),
+                    name=f"Nacelle {band}"
+                ))
 
     fig.add_trace(go.Scatter(
         x=merged["WindBin"],
@@ -557,6 +585,8 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 150)
     if merged["AvgPower"].notna().any():
         y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 150)
+    if not df_t.empty and df_t[power_col].notna().any():
+        y_max = max(y_max, float(np.nanmax(df_t[power_col])) + 150)
 
     fig.update_layout(
         title=dict(
@@ -585,8 +615,8 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         legend=dict(
             orientation="v",
             x=0.72,
-            y=0.62,
-            bgcolor="rgba(255,255,255,0.7)"
+            y=0.98,
+            bgcolor="rgba(255,255,255,0.75)"
         )
     )
     return fig
