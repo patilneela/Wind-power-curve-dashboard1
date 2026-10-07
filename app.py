@@ -5,6 +5,11 @@ import plotly.graph_objects as go
 from scipy.signal import savgol_filter
 from datetime import timedelta
 import os
+import io
+
+from reportlab.lib.pagesizes import landscape, A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 
 st.set_page_config(layout="wide")
 
@@ -42,6 +47,15 @@ login_gate()
 if st.sidebar.button("Logout", key="logout_btn"):
     st.session_state.authenticated = False
     st.rerun()
+
+# =========================
+# SAFE KALEIDO CHECK
+# =========================
+try:
+    import kaleido # noqa: F401
+    KALEIDO_AVAILABLE = True
+except Exception:
+    KALEIDO_AVAILABLE = False
 
 # =========================
 # PATHS
@@ -119,6 +133,29 @@ def safe_savgol(series, window=7, poly=2):
         pass
     return s
 
+def get_nacelle_band(avg_nacelle):
+    if avg_nacelle is None or pd.isna(avg_nacelle):
+        return "NA"
+    if 0 <= avg_nacelle < 60:
+        return "0-60"
+    elif 60 <= avg_nacelle <120:
+        return "60-120"
+    elif 120 <= avg_nacelle <180:
+        return "120-180"
+    elif 180 <= avg_nacelle <270:
+        return "180-270"
+    else:
+        return "Out of Range"
+
+def generate_nacelle_comment(avg_nacelle):
+    if avg_nacelle is None or pd.isna(avg_nacelle):
+        return "Nacelle average not available"
+    band = get_nacelle_band(avg_nacelle)
+    val = round(avg_nacelle, 2)
+    if band == "Out of Range":
+        return f"NacelleAvg: {val}° → Out of configured range"
+        return f"NacelleAvg: {val}° → Band{band}"
+
 def generate_comment(dev):
     if dev is None or pd.isna(dev):
         return "Deviation not available"
@@ -127,7 +164,7 @@ def generate_comment(dev):
 
     if dev < -72:
         return f"Dev: {dev}% → Extreme issue (Data unreliable)"
-    elif dev < -10:
+    elif dev < -8:
         return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
     elif dev < -2:
         return f"Dev: {dev}% → Underperformance"
@@ -139,6 +176,7 @@ def generate_comment(dev):
         return f"Dev: {dev}% → Slight overperformance"
     else:
         return f"Dev: {dev}% → Normal performance"
+
 
 # =========================
 # UI
@@ -438,7 +476,7 @@ def plot_graph(df_t, merged, title, dev, comment):
             x=df_t[wind_col],
             y=df_t[power_col],
             mode="markers",
-            marker=dict(size=4, opacity=0.35, color="rgba(30, 144, 255, 0.55)"),
+            marker=dict(size=4, opacity=0.30, color="rgba(30, 144, 255, 0.55)"),
             name="Scatter Points"
         ))
 
@@ -469,7 +507,7 @@ def plot_graph(df_t, merged, title, dev, comment):
         ),
         xaxis_title="Wind Speed",
         yaxis_title="Power",
-        height=500,
+        height=420,
         annotations=[
             dict(
                 text=comment,
@@ -483,6 +521,48 @@ def plot_graph(df_t, merged, title, dev, comment):
         ]
     )
     return fig
+
+def plot_pitch_nacelle_curve(df_t, pitch_curve, nacelle_curve, title):
+    fig = go.Figure()
+
+    if not df_t.empty:
+        fig.add_trace(go.scatter(
+            x = df_t[wind_col],
+            y = df_t[pitch_col],
+            mode = "markers",
+            marker = dict(size = 4, opacity = 0.25, color = "orange"),
+            name = "Blade Pitch Scatter"))
+        
+        fig.add_trace(go.scatter(
+            x = df_t[wind_col],
+            y = df_t[nacelle_col],
+            mode = "markers",
+            marker = dict(size = 4, opacity = 0.20, color = "teal"),
+            name = "Nacelle Scatter",
+            yaxis = "y2"))
+        
+    if not pitch_curve.empty and
+pitch_curve["AvgMetric"].notna().any():
+    fig.add_trace(go.Scatter(
+        x = pitch_curve["WindBin"],
+        y = pitch_curve["AvgMetric"],
+        mode = "markers",
+        line = dict(width = 3, color = "orange"),
+        marker = dict(size = 6, color = "orange"),
+        name = "Avg Blade Pitch"))
+    
+    if not nacelle_curve.empty and
+nacelle_curve["AvgMetric"].notna.any():
+    fig.add_trace(go.Scatter(
+        x = nacelle_curve["WindBin"],
+        y = nacelle_curve["ÄvgMetric"],
+        mode = "markers",
+        line = dict(width = 3, color = "teal"),
+        marker = dict(size = 6, color = "teal"),
+        name = "Nacelle Position",
+        yaxis = "y2"))
+    return fig
+             
 
 # =========================
 # DISPLAY
@@ -499,6 +579,7 @@ for i, t in enumerate(turbines_to_show):
             res["merged"],
             res["turbine"],
             res["avg_dev"],
+            res["avg_nacelle"],
             res["comment"]
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -522,3 +603,67 @@ results_df = pd.DataFrame(results)
 if not results_df.empty:
     results_df = results_df.sort_values(by="Deviation_%", na_position="last")
     st.dataframe(results_df, use_container_width=True)
+
+try:
+    pdf_buffer = io.BytesIO()
+    pdf = canvas.Canvas(pdf_buffer, pagesize = landscape(A4))
+    width, height = landscape(A4)
+    
+    if os.path.exists(logo_path):
+        pdf.drawImage(logo_path, 30, height - 80, width = 120, height = 40)
+        
+    pdf.setFornt("Helvetica-Bold", 16)
+    pdf.drawString(170, height - 40, "Power Curve Analytics Report")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(170, height - 60, f"Site: {site}")
+    pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
+    
+    y = height - 120
+    for turbine, fig, comment in figures:
+        if KALEIDO_AVAILABLE:
+            try:
+                img = fig.to_image(format = "png")
+                img_reader = ImageReader(io.BytesIO(img))
+                if y < 260:
+                    pdf.showPage()
+                    y = height - 60
+                    pdf.drawImage(img_reader, 30, y - 220, width = 360, height = 200)
+                    pdf.setFont("Helvetica-Bold", 11)
+                    pdf.drawString(420, y - 40, turbine)
+                    pdf.setFont("Helvetica", 10)
+                    pdf.drawString(420, y - 60, comment[:110])
+                    y -= 240
+            except Exception:
+                pass
+        pdf.showPage()
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(30, height - 40, "Turbine Ranking Summary")
+        y = height - 80
+        pdf.setFont("Helvetica", 10)
+
+        if not results_df.empty:
+            for _, row in results_df.iterrows():
+                dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
+                nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
+                pcs_text = "NA" if pd.isna(row["PCurveStsAve"]) else row["PCurveStsAve"]
+                line = f"{row['Turbine']} | Dev: {dev_text}% | Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | PCurveStsAve: {pcs_text} | {row['Status']}"
+                pdf.drawString(40, y, line[:150])
+                y -= 20
+                if y < 40:
+                    pdf.showPage()
+                    y = height - 40
+
+        pdf.save()
+        pdf_buffer.seek(0)
+
+        st.download_button(
+            label="Download Full Dashboard Report (PDF)",
+            data=pdf_buffer.getvalue(),
+            file_name="WindFarm_Full_Report.pdf",
+            mime="application/pdf"
+        )
+    except Exception as e:
+        st.error("PDF generation failed")
+        st.code(str(e))
+
+        
