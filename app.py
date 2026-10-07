@@ -533,6 +533,21 @@ def plot_power_curve(df_t, merged, title, dev, comment):
 
     fig = go.Figure()
 
+    # Base scatter: keep all power samples visible
+    if not df_t.empty:
+        fig.add_trace(go.Scatter(
+            x=df_t[wind_col],
+            y=df_t[power_col],
+            mode="markers",
+            marker=dict(
+                size=6,
+                opacity=0.20,
+                color="rgba(100, 100, 100, 0.35)"
+            ),
+            name="Power Samples"
+        ))
+
+    # Overlay scatter: colored by nacelle bands
     if not df_t.empty and nacelle_col in df_t.columns:
         df_plot = df_t.copy()
         df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
@@ -558,11 +573,12 @@ def plot_power_curve(df_t, merged, title, dev, comment):
                         size=7,
                         opacity=0.75,
                         color=band_colors[band],
-                        line=dict(width=0.3, color=band_colors[band])
+                        line=dict(width=0.2, color=band_colors[band])
                     ),
-                    name=f"Nacelle {band}"
+                    name=f"Power Samples | Nacelle {band}"
                 ))
 
+    # Reference line
     fig.add_trace(go.Scatter(
         x=merged["WindBin"],
         y=merged["RefPower"],
@@ -571,6 +587,7 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         name="Reference Power"
     ))
 
+    # Actual avg power line
     if merged["AvgPower"].notna().any():
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
@@ -590,7 +607,7 @@ def plot_power_curve(df_t, merged, title, dev, comment):
 
     fig.update_layout(
         title=dict(
-            text=f"{title} | {comment}",
+            text=f"{title} | Dev: {dev_txt}% | {comment}",
             font=dict(color=title_color, size=18)
         ),
         xaxis=dict(
@@ -614,9 +631,9 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         paper_bgcolor="white",
         legend=dict(
             orientation="v",
-            x=0.72,
+            x=0.70,
             y=0.98,
-            bgcolor="rgba(255,255,255,0.75)"
+            bgcolor="rgba(255,255,255,0.8)"
         )
     )
     return fig
