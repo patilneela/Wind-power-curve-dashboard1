@@ -658,7 +658,7 @@ def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
         "0-60": "green",
         "60-120": "darkgreen",
         "120-180": "orange",
-        "180-240": "#yellow",
+        "180-240": "#ff7f7f",
         "240-360": "red",
         "Out of Range": "purple",
         "Unknown": "#808080",
