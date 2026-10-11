@@ -556,14 +556,14 @@ def plot_power_curve(df_t, merged, title, dev, comment):
     # Overlay the same samples with colors determined by nacelle-position bands.
     # Slightly smaller markers leave a blue edge visible beneath each colored sample.
     if not df_t.empty and nacelle_col in df_t.columns:
-        df_plot = df_t.dropna(subset=[wind_col, power_col, nacelle_col]).copy()
+        df_plot = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
         df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
 
         band_colors = {
             "0-60": "green",
             "60-120": "darkgreen",
             "120-180": "orange",
-            "180-240": "#ff7f7f",
+            "180-240": "yellow",
             "240-360": "red",
             "Out of Range": "purple",
             "Unknown": "gray",
@@ -649,98 +649,36 @@ def plot_power_curve(df_t, merged, title, dev, comment):
     return fig
 
 def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
-    """Plot nacelle samples by configured angle bands plus the binned nacelle curve."""
     nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
+
     fig = go.Figure()
 
-    # Use the same band-based color structure as the power-curve sample plot.
-    band_colors = {
-        "0-60": "green",
-        "60-120": "darkgreen",
-        "120-180": "orange",
-        "180-240": "#yellow",
-        "240-360": "red",
-        "Out of Range": "purple",
-        "Unknown": "#808080",
-    }
-    band_order = ["0-60", "60-120", "120-180", "180-240", "240-360", "Out of Range", "Unknown"]
-
     if not df_t.empty and nacelle_col in df_t.columns:
-        df_plot = df_t[[wind_col, nacelle_col]].copy()
-        df_plot[wind_col] = pd.to_numeric(df_plot[wind_col], errors="coerce")
-        df_plot[nacelle_col] = pd.to_numeric(df_plot[nacelle_col], errors="coerce")
-        df_plot = df_plot.dropna(subset=[wind_col, nacelle_col])
-        df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
-
-        for band in band_order:
-            band_df = df_plot[df_plot["NacelleBand"] == band]
-            if not band_df.empty:
-                color = band_colors[band]
-                fig.add_trace(go.Scatter(
-                    x=band_df[wind_col],
-                    y=band_df[nacelle_col],
-                    mode="markers",
-                    marker=dict(
-                        size=6,
-                        opacity=0.70,
-                        color=color,
-                        line=dict(width=0.3, color=color),
-                    ),
-                    name=f"Nacelle Samples | {band}°",
-                    customdata=np.column_stack((band_df[wind_col], band_df[nacelle_col])),
-                    hovertemplate=(
-                        "Wind Speed: %{x:.2f} m/s<br>"
-                        "Nacelle Position: %{y:.2f}°<br>"
-                        f"Nacelle Band: {band}°<extra></extra>"
-                    ),
-                ))
-
-    # Binned/smoothed nacelle curve, using the same wind-bin structure as the power curve.
-    if not nacelle_curve.empty and nacelle_curve["AvgMetric"].notna().any():
-        curve = nacelle_curve.dropna(subset=["WindBin", "AvgMetric"]).sort_values("WindBin")
         fig.add_trace(go.Scatter(
-            x=curve["WindBin"],
-            y=curve["AvgMetric"],
+            x=df_t[wind_col],
+            y=df_t[nacelle_col],
+            mode="markers",
+            marker=dict(size=4, opacity=0.25, color="teal"),
+            name="Nacelle Scatter"
+        ))
+
+    if (not nacelle_curve.empty) and nacelle_curve["AvgMetric"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=nacelle_curve["WindBin"],
+            y=nacelle_curve["AvgMetric"],
             mode="lines+markers",
-            line=dict(width=4, color="#0066CC", shape="spline"),
-            marker=dict(size=7, color="#0066CC", line=dict(width=1, color="white")),
-            name="Average Nacelle Curve",
-            hovertemplate="Wind Bin: %{x:.2f} m/s<br>Average Nacelle: %{y:.2f}°<extra></extra>",
+            line=dict(width=3, color="teal"),
+            marker=dict(size=6, color="teal"),
+            name="Avg Nacelle Position"
         ))
 
     fig.update_layout(
-        title=dict(
-            text=f"{title} - Nacelle Curve | Average Nacelle: {nac_txt}°",
-            font=dict(size=18),
-        ),
-        xaxis=dict(
-            title="Wind Speed (m/s)",
-            range=[0, 15],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Nacelle Position (°)",
-            range=[0, 360],
-            dtick=30,
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False,
-        ),
-        height=600,
+        title=f"{title} - Nacelle Curve | Avg Nacelle: {nac_txt}°",
+        xaxis_title="Wind Speed",
+        yaxis_title="Nacelle Position",
+        height=480,
         plot_bgcolor="white",
-        paper_bgcolor="white",
-        hovermode="closest",
-        legend=dict(
-            orientation="v",
-            x=1.01,
-            y=1.0,
-            bgcolor="rgba(255,255,255,0.85)",
-        ),
-        margin=dict(l=65, r=220, t=85, b=60),
+        paper_bgcolor="white"
     )
     return fig
 
