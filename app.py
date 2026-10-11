@@ -527,74 +527,92 @@ def process_turbine(t):
 # PLOT
 # =========================
 def plot_power_curve(df_t, merged, title, dev, comment):
+    """Plot raw power samples in blue and overlay samples colored by nacelle direction band."""
     safe_dev = 0 if dev is None or pd.isna(dev) else dev
     title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
     dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
 
     fig = go.Figure()
 
-    # Base scatter: keep all power samples visible
+    # All raw power-curve samples: BLUE. This is the main sample layer.
     if not df_t.empty:
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=df_t[wind_col],
             y=df_t[power_col],
             mode="markers",
             marker=dict(
-                size=6,
-                opacity=0.20,
-                color="rgba(100, 100, 100, 0.35)"
+                size=7,
+                color="blue",
+                opacity=0.55,
+                line=dict(width=0.5, color="white")
             ),
-            name="Power Samples"
+            name="Power Curve Samples (Blue)",
+            hovertemplate=(
+                "Wind Speed: %{x:.2f} m/s<br>"
+                "Power: %{y:.2f}<extra>Power Curve Sample</extra>"
+            )
         ))
 
-    # Overlay scatter: colored by nacelle bands
+    # Overlay the same samples with colors determined by nacelle-position bands.
+    # Slightly smaller markers leave a blue edge visible beneath each colored sample.
     if not df_t.empty and nacelle_col in df_t.columns:
-        df_plot = df_t.copy()
+        df_plot = df_t.dropna(subset=[wind_col, power_col, nacelle_col]).copy()
         df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
 
         band_colors = {
             "0-60": "green",
             "60-120": "darkgreen",
             "120-180": "orange",
-            "180-240": "#ff7f7f",
-            "240-360": "red"
+            "180-240": "yellow",
+            "240-360": "red",
+            "Out of Range": "purple",
+            "Unknown": "gray",
         }
-
-        band_order = ["0-60", "60-120", "120-180", "180-240", "240-360"]
+        band_order = ["0-60", "60-120", "120-180", "180-240", "240-360", "Out of Range", "Unknown"]
 
         for band in band_order:
             band_df = df_plot[df_plot["NacelleBand"] == band]
             if not band_df.empty:
-                fig.add_trace(go.Scatter(
+                fig.add_trace(go.Scattergl(
                     x=band_df[wind_col],
                     y=band_df[power_col],
                     mode="markers",
                     marker=dict(
-                        size=7,
-                        opacity=0.75,
+                        size=5,
+                        opacity=0.88,
                         color=band_colors[band],
-                        line=dict(width=0.2, color=band_colors[band])
+                        line=dict(width=0.4, color="white")
                     ),
-                    name=f"Power Samples | Nacelle {band}"
+                    name=f"Nacelle Samples {band}°",
+                    customdata=band_df[[nacelle_col]].to_numpy(),
+                    hovertemplate=(
+                        "Wind Speed: %{x:.2f} m/s<br>"
+                        "Power: %{y:.2f}<br>"
+                        "Nacelle Position: %{customdata[0]:.2f}°"
+                        f"<extra>Nacelle Band {band}°</extra>"
+                    )
                 ))
 
-    # Reference line
+    # Reference power curve.
     fig.add_trace(go.Scatter(
         x=merged["WindBin"],
         y=merged["RefPower"],
         mode="lines",
-        line=dict(color="red", width=4),
-        name="Reference Power"
+        line=dict(color="#d62728", width=3, dash="dash"),
+        name="Reference Power Curve",
+        hovertemplate="Wind Speed: %{x:.2f} m/s<br>Reference Power: %{y:.2f}<extra></extra>"
     ))
 
-    # Actual avg power line
+    # Actual average power curve.
     if merged["AvgPower"].notna().any():
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
             y=merged["AvgPower"],
-            mode="lines",
-            line=dict(color="darkgreen", width=5),
-            name="Actual Avg Power"
+            mode="lines+markers",
+            line=dict(color="#00a6ff", width=3),
+            marker=dict(size=5, color="#00a6ff"),
+            name="Actual Average Power",
+            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Average Power: %{y:.2f}<extra></extra>"
         ))
 
     y_max = 3500
@@ -611,30 +629,22 @@ def plot_power_curve(df_t, merged, title, dev, comment):
             font=dict(color=title_color, size=18)
         ),
         xaxis=dict(
-            title="Wind Speed (m/s)",
-            range=[0, 15],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False
+            title="Wind Speed (m/s)", range=[0, 15], showgrid=True,
+            gridcolor="#d9d9d9", gridwidth=1, zeroline=False
         ),
         yaxis=dict(
-            title="Active Power",
-            range=[0, y_max],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False
+            title="Active Power", range=[0, y_max], showgrid=True,
+            gridcolor="#d9d9d9", gridwidth=1, zeroline=False
         ),
-        height=620,
+        height=650,
         plot_bgcolor="white",
         paper_bgcolor="white",
+        hovermode="closest",
         legend=dict(
-            orientation="v",
-            x=0.70,
-            y=0.98,
-            bgcolor="rgba(255,255,255,0.8)"
-        )
+            orientation="v", x=1.01, y=1.0,
+            bgcolor="rgba(255,255,255,0.85)"
+        ),
+        margin=dict(l=60, r=230, t=90, b=60)
     )
     return fig
 
