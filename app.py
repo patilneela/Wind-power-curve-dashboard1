@@ -124,15 +124,27 @@ def compute_preset_range(preset: str, today_ts: pd.Timestamp):
 def safe_savgol(series, window=7, poly=2):
     s = series.copy()
     valid = s.notna()
-    if valid.sum() < window:
+
+    valid_count = valid.sum()
+    if valid_count < 5:
         return s
+
+    if window > valid_count:
+        window = valid_count if valid_count % 2 == 1 else valid_count - 1
+
+    if window < 3:
+        return s
+
+    if poly >= window:
+        poly = max(1, window - 1)
+
     try:
         s.loc[valid] = savgol_filter(s.loc[valid], window, poly)
     except Exception:
         pass
     return s
 
-def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
+def build_metric_curve(df_t, wind_col, metric_col, smooth=False, smooth_window=7, smooth_poly=2):
     tmp = df_t[[wind_col, metric_col]].dropna().copy()
 
     if tmp.empty:
@@ -142,7 +154,7 @@ def build_metric_curve(df_t, wind_col, metric_col, smooth=False):
     out = tmp.groupby("WindBin", as_index=False).agg(AvgMetric=(metric_col, "mean"))
 
     if smooth and not out.empty:
-        out["AvgMetric"] = safe_savgol(out["AvgMetric"], window=7, poly=2)
+        out["AvgMetric"] = safe_savgol(out["AvgMetric"], window=smooth_window, poly=smooth_poly)
 
     return out
 
@@ -487,8 +499,18 @@ def process_turbine(t):
 
     if nacelle_col in df_t.columns and df_t[nacelle_col].notna().any():
         result["avg_nacelle"] = df_t[nacelle_col].mean()
+
+        # smoother nacelle curve for S-shape appearance
+        result["nacelle_curve"] = build_metric_curve(
+            df_t,
+            wind_col,
+            nacelle_col,
+            smooth=True,
+            smooth_window=9,
+            smooth_poly=3
+        )
+
         nacelle_comment = generate_nacelle_comment(result["avg_nacelle"])
-        result["nacelle_curve"] = build_metric_curve(df_t, wind_col, nacelle_col, smooth=True)
     else:
         nacelle_comment = "Nacelle average not available"
 
@@ -534,7 +556,6 @@ def plot_power_curve(df_t, merged, title, dev, comment):
 
     fig = go.Figure()
 
-    # All raw power-curve samples: BLUE. This is the main sample layer.
     if not df_t.empty:
         fig.add_trace(go.Scattergl(
             x=df_t[wind_col],
@@ -553,8 +574,6 @@ def plot_power_curve(df_t, merged, title, dev, comment):
             )
         ))
 
-    # Overlay the same samples with colors determined by nacelle-position bands.
-    # Slightly smaller markers leave a blue edge visible beneath each colored sample.
     if not df_t.empty and nacelle_col in df_t.columns:
         df_plot = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
         df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
@@ -593,7 +612,6 @@ def plot_power_curve(df_t, merged, title, dev, comment):
                     )
                 ))
 
-    # Reference power curve.
     fig.add_trace(go.Scatter(
         x=merged["WindBin"],
         y=merged["RefPower"],
@@ -603,7 +621,6 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         hovertemplate="Wind Speed: %{x:.2f} m/s<br>Reference Power: %{y:.2f}<extra></extra>"
     ))
 
-    # Actual average power curve.
     if merged["AvgPower"].notna().any():
         fig.add_trace(go.Scatter(
             x=merged["WindBin"],
@@ -653,32 +670,75 @@ def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
 
     fig = go.Figure()
 
+    # Raw sample scatter
     if not df_t.empty and nacelle_col in df_t.columns:
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=df_t[wind_col],
             y=df_t[nacelle_col],
             mode="markers",
-            marker=dict(size=4, opacity=0.25, color="teal"),
-            name="Nacelle Scatter"
+            marker=dict(
+                size=5,
+                opacity=0.28,
+                color="rgba(0,128,128,0.55)",
+                line=dict(width=0.3, color="white")
+            ),
+            name="Nacelle Samples",
+            hovertemplate=(
+                "Wind Speed: %{x:.2f} m/s<br>"
+                "Nacelle Position: %{y:.2f}°<extra>Sample</extra>"
+            )
         ))
 
+    # Smoothed S-shape nacelle curve
     if (not nacelle_curve.empty) and nacelle_curve["AvgMetric"].notna().any():
         fig.add_trace(go.Scatter(
             x=nacelle_curve["WindBin"],
             y=nacelle_curve["AvgMetric"],
             mode="lines+markers",
-            line=dict(width=3, color="teal"),
-            marker=dict(size=6, color="teal"),
-            name="Avg Nacelle Position"
+            line=dict(
+                width=4,
+                color="#008080",
+                shape="spline",
+                smoothing=1.2
+            ),
+            marker=dict(
+                size=7,
+                color="#008080"
+            ),
+            name="Smoothed Avg Nacelle Curve",
+            hovertemplate=(
+                "Wind Speed Bin: %{x:.2f} m/s<br>"
+                "Avg Nacelle: %{y:.2f}°<extra>Smoothed Curve</extra>"
+            )
         ))
 
     fig.update_layout(
-        title=f"{title} - Nacelle Curve | Avg Nacelle: {nac_txt}°",
-        xaxis_title="Wind Speed",
-        yaxis_title="Nacelle Position",
+        title=f"{title} - Nacelle Graph | Avg Nacelle: {nac_txt}°",
+        xaxis=dict(
+            title="Wind Speed (m/s)",
+            range=[0, 15],
+            showgrid=True,
+            gridcolor="#d9d9d9",
+            zeroline=False
+        ),
+        yaxis=dict(
+            title="Nacelle Position (°)",
+            range=[0, 360],
+            showgrid=True,
+            gridcolor="#d9d9d9",
+            zeroline=False
+        ),
         height=480,
         plot_bgcolor="white",
-        paper_bgcolor="white"
+        paper_bgcolor="white",
+        hovermode="closest",
+        legend=dict(
+            orientation="v",
+            x=1.01,
+            y=1.0,
+            bgcolor="rgba(255,255,255,0.85)"
+        ),
+        margin=dict(l=60, r=180, t=70, b=60)
     )
     return fig
 
