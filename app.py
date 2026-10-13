@@ -428,29 +428,30 @@ wind_min = st.sidebar.number_input("Wind Min", value=3.0)
 wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 
 # =========================
-# FORMULA DISPLAY
+# FORMULA / LOGIC DISPLAY
 # =========================
 with st.expander("Applied Formula and Filtering Logic", expanded=False):
     st.markdown(f"""
 ### Scatter Logic
 
-**Power Sample Scatter**
-- **X = {wind_col}**
-- **Y = {power_col}**
+**Power Samples Scatter**
+- X = `{wind_col}`
+- Y = `{power_col}`
 
-**Nacelle Sample Scatter**
-- **X = {wind_col}**
-- **Y = {nacelle_col}**
+**Nacelle Samples Scatter**
+- X = `{wind_col}`
+- Y = `{nacelle_col}`
 
 ---
 
 ### Filtering Logic
 
-A row is kept only when:
+Rows are kept only if all these conditions pass:
 
-**Base condition for power curve**
 ```python
 {wind_col} is not null
 {power_col} is not null
 {wind_min} <= {wind_col} <= {wind_max}
 {power_col} >= 0
+{pitch_col} is null OR ({pitch_min} <= {pitch_col} <= {pitch_max})
+{nacelle_col} is null OR ({nacelle_min} <= {nacelle_col} <= {nacelle_max})
