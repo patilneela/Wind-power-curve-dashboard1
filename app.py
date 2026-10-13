@@ -191,9 +191,9 @@ def generate_comment(dev):
     if dev < -72:
         return f"Dev: {dev}% → Extreme issue (Data unreliable)"
     elif dev < -8:
-        return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
+        return f"Dev: {dev}% → Severe underperformance (Blade issue/Dust issue near the Blade/Yaw issue)"
     elif dev < -2:
-        return f"Dev: {dev}% → Underperformance"
+        return f"Dev: {dev}% → Underperformance(Lightly dust issue/Blade issue/Yaw issue)"
     elif dev > 72:
         return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
     elif dev > 8:
