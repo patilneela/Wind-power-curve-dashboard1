@@ -454,11 +454,13 @@ def process_turbine(t):
         "raw_rows": raw_rows,
         "status": "No Data",
         "comment": "No data available",
-        "df_t": pd.DataFrame(columns=[wind_col, power_col]),
+        "df_t": pd.DataFrame(columns=[wind_col, power_col, nacelle_col]),
         "merged": ref_curve.copy(),
         "avg_dev": None,
         "avg_nacelle": None,
-        "nacelle_curve": pd.DataFrame()
+        "nacelle_curve": pd.DataFrame(),
+        "power_sample_count": 0,
+        "nacelle_sample_count": 0
     }
 
     result["merged"]["AvgPower"] = np.nan
@@ -497,10 +499,18 @@ def process_turbine(t):
         result["comment"] = "All rows removed by filters"
         return result
 
+    # Count power samples for scatter
+    power_samples_df = df_t.dropna(subset=[wind_col, power_col]).copy()
+    result["power_sample_count"] = len(power_samples_df)
+
+    # Count nacelle samples for scatter
+    if nacelle_col in df_t.columns:
+        nacelle_samples_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
+        result["nacelle_sample_count"] = len(nacelle_samples_df)
+
     if nacelle_col in df_t.columns and df_t[nacelle_col].notna().any():
         result["avg_nacelle"] = df_t[nacelle_col].mean()
 
-        # smoother nacelle curve for S-shape appearance
         result["nacelle_curve"] = build_metric_curve(
             df_t,
             wind_col,
@@ -548,18 +558,19 @@ def process_turbine(t):
 # =========================
 # PLOT
 # =========================
-def plot_power_curve(df_t, merged, title, dev, comment):
-    """Plot raw power samples in blue and overlay samples colored by nacelle direction band."""
+def plot_power_curve(df_t, merged, title, dev, comment, power_sample_count):
     safe_dev = 0 if dev is None or pd.isna(dev) else dev
     title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
     dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
 
     fig = go.Figure()
 
-    if not df_t.empty:
+    power_scatter_df = df_t.dropna(subset=[wind_col, power_col]).copy()
+
+    if not power_scatter_df.empty:
         fig.add_trace(go.Scattergl(
-            x=df_t[wind_col],
-            y=df_t[power_col],
+            x=power_scatter_df[wind_col],
+            y=power_scatter_df[power_col],
             mode="markers",
             marker=dict(
                 size=7,
@@ -567,15 +578,15 @@ def plot_power_curve(df_t, merged, title, dev, comment):
                 opacity=0.55,
                 line=dict(width=0.5, color="white")
             ),
-            name="Power Curve Samples (Blue)",
+            name=f"Power Samples ({power_sample_count})",
             hovertemplate=(
                 "Wind Speed: %{x:.2f} m/s<br>"
-                "Power: %{y:.2f}<extra>Power Curve Sample</extra>"
+                "Active Power: %{y:.2f}<extra>Power Sample</extra>"
             )
         ))
 
     if not df_t.empty and nacelle_col in df_t.columns:
-        df_plot = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
+        df_plot = df_t.dropna(subset=[wind_col, nacelle_col, power_col]).copy()
         df_plot["NacelleBand"] = df_plot[nacelle_col].apply(get_nacelle_color_band)
 
         band_colors = {
@@ -602,13 +613,13 @@ def plot_power_curve(df_t, merged, title, dev, comment):
                         color=band_colors[band],
                         line=dict(width=0.4, color="white")
                     ),
-                    name=f"Nacelle Samples {band}°",
+                    name=f"Nacelle Band {band}",
                     customdata=band_df[[nacelle_col]].to_numpy(),
                     hovertemplate=(
                         "Wind Speed: %{x:.2f} m/s<br>"
                         "Power: %{y:.2f}<br>"
                         "Nacelle Position: %{customdata[0]:.2f}°"
-                        f"<extra>Nacelle Band {band}°</extra>"
+                        f"<extra>Nacelle Band {band}</extra>"
                     )
                 ))
 
@@ -637,12 +648,12 @@ def plot_power_curve(df_t, merged, title, dev, comment):
         y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 150)
     if merged["AvgPower"].notna().any():
         y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 150)
-    if not df_t.empty and df_t[power_col].notna().any():
-        y_max = max(y_max, float(np.nanmax(df_t[power_col])) + 150)
+    if not power_scatter_df.empty and power_scatter_df[power_col].notna().any():
+        y_max = max(y_max, float(np.nanmax(power_scatter_df[power_col])) + 150)
 
     fig.update_layout(
         title=dict(
-            text=f"{title} | Dev: {dev_txt}% | {comment}",
+            text=f"{title} | Dev: {dev_txt}% | Samples: {power_sample_count} | {comment}",
             font=dict(color=title_color, size=18)
         ),
         xaxis=dict(
@@ -665,31 +676,31 @@ def plot_power_curve(df_t, merged, title, dev, comment):
     )
     return fig
 
-def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
+def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle, nacelle_sample_count):
     nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
 
     fig = go.Figure()
 
-    # Raw sample scatter
-    if not df_t.empty and nacelle_col in df_t.columns:
+    nacelle_scatter_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
+
+    if not nacelle_scatter_df.empty:
         fig.add_trace(go.Scattergl(
-            x=df_t[wind_col],
-            y=df_t[nacelle_col],
+            x=nacelle_scatter_df[wind_col],
+            y=nacelle_scatter_df[nacelle_col],
             mode="markers",
             marker=dict(
                 size=5,
-                opacity=0.28,
-                color="rgba(0,128,128,0.55)",
+                opacity=0.35,
+                color="rgba(0,128,128,0.65)",
                 line=dict(width=0.3, color="white")
             ),
-            name="Nacelle Samples",
+            name=f"Nacelle Samples ({nacelle_sample_count})",
             hovertemplate=(
                 "Wind Speed: %{x:.2f} m/s<br>"
-                "Nacelle Position: %{y:.2f}°<extra>Sample</extra>"
+                "Nacelle Position: %{y:.2f}°<extra>Nacelle Sample</extra>"
             )
         ))
 
-    # Smoothed S-shape nacelle curve
     if (not nacelle_curve.empty) and nacelle_curve["AvgMetric"].notna().any():
         fig.add_trace(go.Scatter(
             x=nacelle_curve["WindBin"],
@@ -713,7 +724,7 @@ def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle):
         ))
 
     fig.update_layout(
-        title=f"{title} - Nacelle Graph | Avg Nacelle: {nac_txt}°",
+        title=f"{title} - Nacelle Graph | Avg Nacelle: {nac_txt}° | Samples: {nacelle_sample_count}",
         xaxis=dict(
             title="Wind Speed (m/s)",
             range=[0, 15],
@@ -760,18 +771,22 @@ for t in turbines_to_show:
             res["merged"],
             res["turbine"],
             res["avg_dev"],
-            res["comment"]
+            res["comment"],
+            res["power_sample_count"]
         )
         st.plotly_chart(fig_power, use_container_width=True)
+        st.caption(f"Power Samples Count: {res['power_sample_count']}")
 
     with tab2:
         fig_nacelle = plot_nacelle_graph(
             res["df_t"],
             res["nacelle_curve"],
             res["turbine"],
-            res["avg_nacelle"]
+            res["avg_nacelle"],
+            res["nacelle_sample_count"]
         )
         st.plotly_chart(fig_nacelle, use_container_width=True)
+        st.caption(f"Nacelle Samples Count: {res['nacelle_sample_count']}")
 
     st.markdown("### Analysis")
     st.code(res["comment"])
@@ -784,6 +799,8 @@ for t in turbines_to_show:
         "Deviation_%": None if res["avg_dev"] is None else round(res["avg_dev"], 2),
         "Avg_Nacelle": None if res["avg_nacelle"] is None else round(res["avg_nacelle"], 2),
         "Nacelle_Band": get_nacelle_band(res["avg_nacelle"]),
+        "Power_Samples": res["power_sample_count"],
+        "Nacelle_Samples": res["nacelle_sample_count"],
         "Status": res["status"],
         "Rows": res["raw_rows"],
         "Comment": res["comment"]
@@ -847,8 +864,14 @@ try:
         for _, row in results_df.iterrows():
             dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
             nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
-            line = f"{row['Turbine']} | Dev: {dev_text}% | Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | {row['Status']}"
-            pdf.drawString(40, y, line[:150])
+            line = (
+                f"{row['Turbine']} | Dev: {dev_text}% | "
+                f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
+                f"Power Samples: {row['Power_Samples']} | "
+                f"Nacelle Samples: {row['Nacelle_Samples']} | "
+                f"{row['Status']}"
+            )
+            pdf.drawString(40, y, line[:170])
             y -= 20
             if y < 40:
                 pdf.showPage()
