@@ -862,13 +862,10 @@ def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle, nacelle_sample_c
     return fig
 
 # =========================
-# DISPLAY — KEEP NACELLE GRAPH ONLY PER TURBINE
-# The old per-turbine power-curve graph is intentionally removed.
-# Power-curve and deviation graphs are shown only in the new all-turbine
-# standalone-style analysis section below.
+# DISPLAY
 # =========================
 results = []
-figures = []  # Intentionally no legacy per-turbine power-curve figures.
+figures = []
 processed_results = {}
 
 for t in turbines_to_show:
@@ -876,18 +873,38 @@ for t in turbines_to_show:
     processed_results[t] = res
 
     st.markdown(f"## Turbine: {t}")
-    st.subheader("Nacelle Graph")
-    fig_nacelle = plot_nacelle_graph(
-        res["df_t"],
-        res["nacelle_curve"],
-        res["turbine"],
-        res["avg_nacelle"],
-        res["nacelle_sample_count"],
-    )
-    st.plotly_chart(fig_nacelle, use_container_width=True)
-    st.caption(f"Nacelle Sample Formula: X = {wind_col}, Y = {nacelle_col}")
-    st.caption(f"Nacelle Samples Count: {res['nacelle_sample_count']}")
+    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Graph"])
+
+    with tab1:
+        fig_power = plot_power_curve(
+            res["power_curve_df"],
+            res["merged"],
+            res["turbine"],
+            res["avg_dev"],
+            res["comment"],
+            res["power_sample_count"],
+        )
+        st.plotly_chart(fig_power, use_container_width=True)
+        st.caption(f"Power Sample Formula: X = {wind_col}, Y = {power_col}")
+        st.caption(f"Power Samples Count: {res['power_sample_count']}")
+
+    with tab2:
+        fig_nacelle = plot_nacelle_graph(
+            res["df_t"],
+            res["nacelle_curve"],
+            res["turbine"],
+            res["avg_nacelle"],
+            res["nacelle_sample_count"],
+        )
+        st.plotly_chart(fig_nacelle, use_container_width=True)
+        st.caption(f"Nacelle Sample Formula: X = {wind_col}, Y = {nacelle_col}")
+        st.caption(f"Nacelle Samples Count: {res['nacelle_sample_count']}")
+
+    st.markdown("### Analysis")
+    st.code(res["comment"])
     st.divider()
+
+    figures.append((t, fig_power, res["comment"]))
 
     results.append(
         {
@@ -919,7 +936,7 @@ if not results_df.empty:
 # Uses the same analysis pipeline for any selected site/reference column.
 # =========================
 st.subheader(f"Detailed Power-Curve Analysis — {site}")
-st.caption("Only the new standalone-style power-curve and deviation graphs are shown here. They use the required status/stability filters, the selected site reference curve, interpolation without extrapolation, and 0.5 m/s wind bins. Fleet charts and summary tables cover all turbines detected in the uploaded SCADA file, regardless of the selected turbine display mode.")
+st.caption("The summary tables below use the required status/stability filters, the selected site's reference curve, interpolation without extrapolation, and 0.5 m/s wind bins. Fleet and summary tables cover all turbines detected in the uploaded SCADA file; the individual graph display follows the current turbine selection/view.")
 
 # Process any turbines not already processed in the display loop so fleet
 # summaries cover all turbines in the uploaded SCADA file, not only the ones
@@ -1126,8 +1143,6 @@ try:
 
     y = height - 120
 
-    # Legacy per-turbine power-curve figures were removed. The PDF retains the
-    # ranking summary; detailed all-turbine analysis is available in the Excel export.
     for turbine, fig, comment in figures:
         if KALEIDO_AVAILABLE:
             try:
