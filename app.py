@@ -212,6 +212,286 @@ def generate_comment(dev):
         return f"Dev: {dev}% → Normal performance"
 
 
+def build_dashboard_filtered_df(df_in, wind_col, power_col, pitch_col, nacelle_col,
+                                wind_min, wind_max, pitch_min, pitch_max, nacelle_min, nacelle_max):
+    df_out = df_in.dropna(subset=[wind_col, power_col]).copy()
+
+    if df_out.empty:
+        return df_out
+
+    df_out = df_out[
+        (df_out[wind_col] >= wind_min)
+        & (df_out[wind_col] <= wind_max)
+        & (df_out[power_col] >= 0)
+    ].copy()
+
+    if pitch_col in df_out.columns:
+        df_out = df_out[
+            df_out[pitch_col].isna()
+            | ((df_out[pitch_col] >= pitch_min) & (df_out[pitch_col] <= pitch_max))
+        ].copy()
+
+    if nacelle_col in df_out.columns:
+        df_out = df_out[
+            df_out[nacelle_col].isna()
+            | ((df_out[nacelle_col] >= nacelle_min) & (df_out[nacelle_col] <= nacelle_max))
+        ].copy()
+
+    return df_out
+
+
+def build_site_reference_map(ref_raw):
+    site_headers = ref_raw.iloc[2].copy()
+    wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
+
+    site_map = {}
+    for col_idx in range(1, ref_raw.shape[1]):
+        site_name = str(site_headers.iloc[col_idx]).strip()
+        if not site_name or site_name.lower() in {"nan", "none", "site", "site name"}:
+            continue
+
+        ref_power = pd.to_numeric(ref_raw.iloc[3:, col_idx], errors="coerce")
+        ref = pd.DataFrame({
+            "WindSpeed": wind_series,
+            "RefPower": ref_power
+        }).dropna()
+
+        ref = ref[(ref["WindSpeed"] >= 3) & (ref["WindSpeed"] <= 15)]
+        ref = ref.sort_values("WindSpeed").drop_duplicates("WindSpeed")
+
+        if len(ref) < 2:
+            continue
+
+        bin_min = np.ceil(ref["WindSpeed"].min() / BIN_SIZE) * BIN_SIZE
+        bin_max = np.floor(ref["WindSpeed"].max() / BIN_SIZE) * BIN_SIZE
+        if bin_min > bin_max:
+            continue
+
+        wind_bins = np.arange(bin_min, bin_max + (BIN_SIZE * 0.25), BIN_SIZE).round(6)
+        ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
+
+        site_map[site_name] = pd.DataFrame({
+            "WindBin": wind_bins,
+            "RefPower": ref_interp
+        })
+
+    return site_map
+
+
+def apply_power_curve_logic(df_in, ref_curve, wind_col, power_col,
+                            status_filter_col, wind_std_filter_col, pitch_std_filter_col):
+    required_cols = [status_filter_col, wind_std_filter_col, pitch_std_filter_col]
+    missing_deviation_cols = [
+        name for name, col in zip(
+            ["PCurveStsAve", "WindSpeedStd", "BladePitchStd"],
+            required_cols,
+        ) if col is None
+    ]
+
+    if missing_deviation_cols:
+        empty_curve = df_in.iloc[0:0].copy()
+        merged = ref_curve.copy()
+        merged["AvgPower"] = np.nan
+        merged["Deviation_%"] = np.nan
+        return {
+            "power_curve_df": empty_curve,
+            "merged": merged,
+            "avg_dev": None,
+            "missing_deviation_cols": missing_deviation_cols,
+            "deviation_filter_rows": 0,
+        }
+
+    power_curve_df = df_in[
+        (df_in[status_filter_col] == 100)
+        & (df_in[wind_std_filter_col] < 1)
+        & (df_in[pitch_std_filter_col].between(-5, 19, inclusive="both"))
+    ].copy()
+
+    ref_wind_min = float(ref_curve["WindBin"].min())
+    ref_wind_max = float(ref_curve["WindBin"].max())
+
+    power_curve_df = power_curve_df[
+        power_curve_df[wind_col].between(ref_wind_min, ref_wind_max, inclusive="both")
+    ].copy()
+
+    if not power_curve_df.empty:
+        power_curve_df["_ReferencePower_kW"] = np.interp(
+            power_curve_df[wind_col].to_numpy(dtype=float),
+            ref_curve["WindBin"].to_numpy(dtype=float),
+            ref_curve["RefPower"].to_numpy(dtype=float),
+        )
+        power_curve_df["_Deviation_kW"] = (
+            power_curve_df[power_col] - power_curve_df["_ReferencePower_kW"]
+        )
+        power_curve_df["_Deviation_pct"] = np.where(
+            power_curve_df["_ReferencePower_kW"] > 0,
+            100 * power_curve_df["_Deviation_kW"] / power_curve_df["_ReferencePower_kW"],
+            np.nan,
+        )
+        power_curve_df["_WindBin"] = (
+            np.floor(power_curve_df[wind_col] / BIN_SIZE) * BIN_SIZE
+        ).round(6)
+
+        actual = power_curve_df.groupby("_WindBin", as_index=False).agg(
+            AvgPower=(power_col, "mean"),
+            MeanReferencePower=("_ReferencePower_kW", "mean"),
+            Deviation_pct=("_Deviation_pct", "mean"),
+        ).rename(columns={"_WindBin": "WindBin"})
+    else:
+        actual = pd.DataFrame(columns=["WindBin", "AvgPower", "MeanReferencePower", "Deviation_pct"])
+
+    merged = ref_curve.merge(actual, on="WindBin", how="left")
+    merged["AvgPower"] = safe_savgol(merged["AvgPower"], window=7, poly=2)
+    merged["Deviation_%"] = merged["Deviation_pct"]
+    merged = merged.drop(columns=["Deviation_pct"], errors="ignore")
+
+    if not power_curve_df.empty:
+        mean_actual = power_curve_df[power_col].mean()
+        mean_reference = power_curve_df["_ReferencePower_kW"].mean()
+        if pd.notna(mean_reference) and mean_reference > 0:
+            avg_dev = 100 * (mean_actual - mean_reference) / mean_reference
+        else:
+            avg_dev = np.nan
+    else:
+        avg_dev = np.nan
+
+    if pd.isna(avg_dev):
+        avg_dev = None
+
+    return {
+        "power_curve_df": power_curve_df,
+        "merged": merged,
+        "avg_dev": avg_dev,
+        "missing_deviation_cols": [],
+        "deviation_filter_rows": len(power_curve_df),
+    }
+
+
+def build_site_analysis(all_processed_results, ref_curve, df_source, time_col, wind_col, power_col,
+                        status_filter_col, wind_std_filter_col, pitch_std_filter_col, site, start_day, end_day):
+    analysis_frames = [
+        r["power_curve_df"].copy()
+        for r in all_processed_results.values()
+        if isinstance(r.get("power_curve_df"), pd.DataFrame) and not r["power_curve_df"].empty
+    ]
+
+    if analysis_frames:
+        analysis_data = pd.concat(analysis_frames, ignore_index=True)
+    else:
+        analysis_data = pd.DataFrame()
+
+    filter_count_rows = [["SCADA records in selected date range", int(len(df_source))]]
+
+    if status_filter_col is not None:
+        _status_mask = df_source[status_filter_col].eq(100)
+        filter_count_rows.append(["PCurveStsAve = 100", int(_status_mask.sum())])
+    else:
+        _status_mask = pd.Series(False, index=df_source.index)
+        filter_count_rows.append(["PCurveStsAve = 100 (column missing)", 0])
+
+    if wind_std_filter_col is not None:
+        _wind_std_mask = df_source[wind_std_filter_col].lt(1)
+    else:
+        _wind_std_mask = pd.Series(False, index=df_source.index)
+
+    if pitch_std_filter_col is not None:
+        _pitch_std_mask = df_source[pitch_std_filter_col].between(-5, 19, inclusive="both")
+    else:
+        _pitch_std_mask = pd.Series(False, index=df_source.index)
+
+    filter_count_rows.extend([
+        ["After status and WindSpeedStd < 1", int((_status_mask & _wind_std_mask).sum())],
+        ["After all three required filters", int((_status_mask & _wind_std_mask & _pitch_std_mask).sum())],
+        ["Compared with selected reference (after dashboard filters and reference-range check)", int(len(analysis_data))],
+    ])
+    filter_counts_df = pd.DataFrame(filter_count_rows, columns=["Filter Stage", "Record Count"])
+
+    if analysis_data.empty:
+        return {
+            "analysis_data": analysis_data,
+            "filter_counts_df": filter_counts_df,
+            "overall_df": None,
+            "wtg_summary_df": None,
+            "fleet_bins_df": None,
+            "wtg_bins_df": None,
+        }
+
+    analysis_data["WTG"] = analysis_data["Name"].astype(str)
+    analysis_data["WindSpeed_mps"] = pd.to_numeric(analysis_data[wind_col], errors="coerce")
+    analysis_data["ActualPower_kW"] = pd.to_numeric(analysis_data[power_col], errors="coerce")
+    analysis_data["ReferencePower_kW"] = analysis_data["_ReferencePower_kW"]
+    analysis_data["Deviation_kW"] = analysis_data["_Deviation_kW"]
+    analysis_data["Shortfall_kW"] = -analysis_data["Deviation_kW"]
+    analysis_data["Deviation_pct"] = analysis_data["_Deviation_pct"]
+    analysis_data["WindSpeedBin_mps"] = analysis_data["_WindBin"]
+    analysis_data["DateTime"] = analysis_data[time_col]
+
+    wtg_bins_df = analysis_data.groupby(["WTG", "WindSpeedBin_mps"], as_index=False).agg(
+        Samples=("ActualPower_kW", "size"),
+        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+        MeanActualPower_kW=("ActualPower_kW", "mean"),
+        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+        MeanDeviation_kW=("Deviation_kW", "mean"),
+        MeanShortfall_kW=("Shortfall_kW", "mean"),
+        MeanDeviation_pct=("Deviation_pct", "mean"),
+        PowerStdDev_kW=("ActualPower_kW", "std"),
+    )
+
+    fleet_bins_df = analysis_data.groupby("WindSpeedBin_mps", as_index=False).agg(
+        Samples=("ActualPower_kW", "size"),
+        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+        MeanActualPower_kW=("ActualPower_kW", "mean"),
+        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+        MeanDeviation_kW=("Deviation_kW", "mean"),
+        MeanDeviation_pct=("Deviation_pct", "mean"),
+    )
+
+    wtg_summary_df = analysis_data.groupby("WTG", as_index=False).agg(
+        ValidSamples=("ActualPower_kW", "size"),
+        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+        MeanActualPower_kW=("ActualPower_kW", "mean"),
+        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+        MeanDeviation_kW=("Deviation_kW", "mean"),
+        MeanSampleDeviation_pct=("Deviation_pct", "mean"),
+        FirstTimestamp=("DateTime", "min"),
+        LastTimestamp=("DateTime", "max"),
+    )
+    wtg_summary_df["AggregateDeviation_pct"] = np.where(
+        wtg_summary_df["MeanReferencePower_kW"] > 0,
+        100 * (wtg_summary_df["MeanActualPower_kW"] - wtg_summary_df["MeanReferencePower_kW"])
+        / wtg_summary_df["MeanReferencePower_kW"],
+        np.nan,
+    )
+    wtg_summary_df = wtg_summary_df.sort_values("AggregateDeviation_pct", na_position="last")
+
+    ref_min_value = float(ref_curve["WindBin"].min())
+    ref_max_value = float(ref_curve["WindBin"].max())
+
+    overall_df = pd.DataFrame([
+        ["Selected site", site],
+        ["Selected date range", f"{start_day} to {end_day}"],
+        ["Turbines compared", int(analysis_data["WTG"].nunique())],
+        ["Records compared to reference curve", int(len(analysis_data))],
+        ["Reference curve minimum wind speed (m/s)", ref_min_value],
+        ["Reference curve maximum wind speed (m/s)", ref_max_value],
+        ["Filter 1", "PCurveStsAve = 100"],
+        ["Filter 2", "WindSpeedStd < 1"],
+        ["Filter 3", "-5 <= BladePitchStd <= 19"],
+        ["Wind-speed bin width (m/s)", BIN_SIZE],
+        ["Deviation sign", "Actual power - reference power; negative means below reference"],
+        ["Aggregate turbine deviation", "100 * (mean actual power - mean reference power) / mean reference power"],
+    ], columns=["Metric", "Value"])
+
+    return {
+        "analysis_data": analysis_data,
+        "filter_counts_df": filter_counts_df,
+        "overall_df": overall_df,
+        "wtg_summary_df": wtg_summary_df,
+        "fleet_bins_df": fleet_bins_df,
+        "wtg_bins_df": wtg_bins_df,
+    }
+
+
 # =========================
 # UI HEADER
 # =========================
@@ -276,9 +556,6 @@ auto_power = detect_column(
 auto_pitch = detect_column(available_columns, ["BladePitchAve", "PitchAve", "Pitch"])
 auto_nacelle = detect_column(available_columns, ["NacellePositionAve", "NacelleAve", "Nacelle Position"])
 
-# Required power-curve status / stability filters from the standalone analysis.
-# These are applied to power-curve samples and deviation calculations, but do not
-# alter the existing nacelle graph filtering.
 status_filter_col = detect_column(available_columns, ["PCurveStsAve"])
 wind_std_filter_col = detect_column(available_columns, ["WindSpeedStd"])
 pitch_std_filter_col = detect_column(available_columns, ["BladePitchStd"])
@@ -317,13 +594,11 @@ df[power_col] = pd.to_numeric(df[power_col], errors="coerce")
 df[pitch_col] = pd.to_numeric(df[pitch_col], errors="coerce")
 df[nacelle_col] = pd.to_numeric(df[nacelle_col], errors="coerce")
 
-# Parse the three required deviation-filter columns when present.
 for _filter_col in [status_filter_col, wind_std_filter_col, pitch_std_filter_col]:
     if _filter_col is not None:
         df[_filter_col] = pd.to_numeric(df[_filter_col], errors="coerce")
 
 df["Name"] = df["Name"].astype(str).str.strip()
-
 df = df.dropna(subset=["Name"])
 
 if df.empty:
@@ -398,68 +673,22 @@ if not turbines_to_show:
 @st.cache_data
 def load_reference(reference_file):
     ref_raw = pd.read_excel(reference_file, sheet_name="Power Curve", header=None)
-    site_headers = ref_raw.iloc[2].copy()
-    site_names = []
-    for value in site_headers.iloc[1:].tolist():
-        if pd.isna(value):
-            continue
-        name = str(value).strip()
-        if name and name.lower() not in {"nan", "none", "site", "site name"} and name not in site_names:
-            site_names.append(name)
+    site_map = build_site_reference_map(ref_raw)
+    site_names = list(site_map.keys())
     if not site_names:
-        raise ValueError("No site names found in row 3 of the Power Curve sheet.")
-    return ref_raw, site_names
+        raise ValueError("No valid site reference curves found in Power Curve sheet.")
+    return ref_raw, site_names, site_map
 
 
 try:
-    ref_raw, ref_site_names = load_reference(ref_file)
+    ref_raw, ref_site_names, ref_site_map = load_reference(ref_file)
 except Exception as e:
     st.error("Unable to read reference Excel / Power Curve sheet.")
     st.code(str(e))
     st.stop()
 
 site = st.sidebar.selectbox("Select Site / Reference Column", ref_site_names)
-
-
-def load_reference_curve(ref_raw, selected_site):
-    site_headers = ref_raw.iloc[2].copy()
-    wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
-
-    matched_col = None
-    for col_idx in range(1, ref_raw.shape[1]):
-        header_text_raw = site_headers.iloc[col_idx]
-        if str(header_text_raw).strip() == selected_site:
-            matched_col = col_idx
-            break
-
-    if matched_col is None:
-        st.error("Selected site not found in reference sheet.")
-        st.stop()
-
-    ref_power = pd.to_numeric(ref_raw.iloc[3:, matched_col], errors="coerce")
-
-    ref = pd.DataFrame({"WindSpeed": wind_series, "RefPower": ref_power}).dropna()
-    ref = ref[(ref["WindSpeed"] >= 3) & (ref["WindSpeed"] <= 15)]
-    ref = ref.sort_values("WindSpeed").drop_duplicates("WindSpeed")
-
-    if ref.empty or len(ref) < 2:
-        st.error("No valid reference data found (at least two wind-speed points are required).")
-        st.stop()
-
-    # Build half-metre-per-second reference bins only inside the actual source
-    # curve range. This avoids np.interp extrapolation beyond reference data.
-    bin_min = np.ceil(ref["WindSpeed"].min() / BIN_SIZE) * BIN_SIZE
-    bin_max = np.floor(ref["WindSpeed"].max() / BIN_SIZE) * BIN_SIZE
-    if bin_min > bin_max:
-        st.error("Reference curve has no range wide enough for 0.5 m/s bins.")
-        st.stop()
-    wind_bins = np.arange(bin_min, bin_max + (BIN_SIZE * 0.25), BIN_SIZE).round(6)
-    ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
-
-    return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
-
-
-ref_curve = load_reference_curve(ref_raw, site)
+ref_curve = ref_site_map[site].copy()
 
 st.subheader(f"Reference Selected: {site}")
 st.markdown(f"Date Range: {start_day} → {end_day}")
@@ -479,9 +708,13 @@ wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 # FORMULA / LOGIC DISPLAY
 # =========================
 with st.expander("Applied Formula and Filtering Logic", expanded=False):
+    st.markdown("### Selected Site Reference Logic")
+    st.markdown(f"- The same power-curve logic is applied to the currently selected site: **{site}**.")
+    st.markdown("- The dashboard dynamically reads the chosen site's reference column from the uploaded Excel sheet.")
+
     st.markdown("### Scatter Logic")
-    st.markdown(f"- **Power Samples Scatter:** X = `{wind_col}`, Y = `{power_col}`; includes only records passing the three required power-curve filters plus the existing dashboard filters.")
-    st.markdown(f"- **Nacelle Samples Scatter:** X = `{wind_col}`, Y = `{nacelle_col}`; retains the existing dashboard filters and is not restricted by the three power-curve status filters.")
+    st.markdown(f"- **Power Samples Scatter:** X = `{wind_col}`, Y = `{power_col}`; includes only records passing dashboard filters and required power-curve filters.")
+    st.markdown(f"- **Nacelle Samples Scatter:** X = `{wind_col}`, Y = `{nacelle_col}`; uses only dashboard filters and does not depend on power-curve status/stability filters.")
 
     st.markdown("### Filtering Logic")
     st.code(
@@ -493,10 +726,10 @@ with st.expander("Applied Formula and Filtering Logic", expanded=False):
                 f"{power_col} >= 0",
                 f"{pitch_col} is null OR ({pitch_min} <= {pitch_col} <= {pitch_max})",
                 f"{nacelle_col} is null OR ({nacelle_min} <= {nacelle_col} <= {nacelle_max})",
-                "Power-curve and deviation filters:",
-                f"{status_filter_col} == 100" if status_filter_col else "PCurveStsAve column missing; power-curve samples are unavailable",
-                f"{wind_std_filter_col} < 1" if wind_std_filter_col else "WindSpeedStd column missing; power-curve samples are unavailable",
-                f"-5 <= {pitch_std_filter_col} <= 19" if pitch_std_filter_col else "BladePitchStd column missing; power-curve samples are unavailable",
+                "Required power-curve filters:",
+                f"{status_filter_col} == 100" if status_filter_col else "PCurveStsAve column missing",
+                f"{wind_std_filter_col} < 1" if wind_std_filter_col else "WindSpeedStd column missing",
+                f"-5 <= {pitch_std_filter_col} <= 19" if pitch_std_filter_col else "BladePitchStd column missing",
             ]
         ),
         language="python",
@@ -507,8 +740,8 @@ with st.expander("Applied Formula and Filtering Logic", expanded=False):
         "\n".join(
             [
                 f"WindBin = floor({wind_col} / {BIN_SIZE}) * {BIN_SIZE}",
-                f"AvgPower = mean({power_col}) for each WindBin after required filters",
-                "ReferencePower = linear interpolation (no extrapolation)",
+                "ReferencePower = selected site's interpolated reference curve",
+                "Deviation_kW = ActualPower - ReferencePower",
                 "Sample Deviation_% = 100 * (ActualPower - ReferencePower) / ReferencePower",
                 "Aggregate Turbine Deviation_% = 100 * (mean ActualPower - mean ReferencePower) / mean ReferencePower",
             ]
@@ -531,14 +764,17 @@ def process_turbine(t):
         "raw_rows": raw_rows,
         "status": "No Data",
         "comment": "No data available",
-        "df_t": pd.DataFrame(columns=[wind_col, power_col, nacelle_col]),
+        "df_dashboard": pd.DataFrame(columns=[wind_col, power_col, nacelle_col]),
+        "df_nacelle": pd.DataFrame(columns=[wind_col, nacelle_col]),
         "power_curve_df": pd.DataFrame(columns=[wind_col, power_col]),
         "merged": ref_curve.copy(),
         "avg_dev": None,
         "avg_nacelle": None,
         "nacelle_curve": pd.DataFrame(),
-        "power_sample_count": 0,
+        "dashboard_power_sample_count": 0,
+        "deviation_filter_rows": 0,
         "nacelle_sample_count": 0,
+        "missing_deviation_cols": [],
     }
 
     result["merged"]["AvgPower"] = np.nan
@@ -547,41 +783,33 @@ def process_turbine(t):
     if raw_rows == 0:
         return result
 
-    df_t = df_t_all.dropna(subset=[wind_col, power_col]).copy()
+    df_dashboard = build_dashboard_filtered_df(
+        df_t_all,
+        wind_col,
+        power_col,
+        pitch_col,
+        nacelle_col,
+        wind_min,
+        wind_max,
+        pitch_min,
+        pitch_max,
+        nacelle_min,
+        nacelle_max,
+    )
 
-    if df_t.empty:
-        result["status"] = "No Valid Data"
-        result["comment"] = "Missing wind or power values"
-        return result
-
-    df_t = df_t[
-        (df_t[wind_col] >= wind_min)
-        & (df_t[wind_col] <= wind_max)
-        & (df_t[power_col] >= 0)
-    ].copy()
-
-    if pitch_col in df_t.columns:
-        df_t = df_t[
-            df_t[pitch_col].isna()
-            | ((df_t[pitch_col] >= pitch_min) & (df_t[pitch_col] <= pitch_max))
-        ].copy()
-
-    if nacelle_col in df_t.columns:
-        df_t = df_t[
-            df_t[nacelle_col].isna()
-            | ((df_t[nacelle_col] >= nacelle_min) & (df_t[nacelle_col] <= nacelle_max))
-        ].copy()
-
-    if df_t.empty:
+    if df_dashboard.empty:
         result["status"] = "Filtered Out"
-        result["comment"] = "All rows removed by filters"
+        result["comment"] = "All rows removed by dashboard filters"
         return result
 
-    power_samples_df = df_t.dropna(subset=[wind_col, power_col]).copy()
-    nacelle_samples_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
+    result["df_dashboard"] = df_dashboard
 
-    result["power_sample_count"] = len(power_samples_df)
+    dashboard_power_samples_df = df_dashboard.dropna(subset=[wind_col, power_col]).copy()
+    nacelle_samples_df = df_dashboard.dropna(subset=[wind_col, nacelle_col]).copy()
+
+    result["dashboard_power_sample_count"] = len(dashboard_power_samples_df)
     result["nacelle_sample_count"] = len(nacelle_samples_df)
+    result["df_nacelle"] = nacelle_samples_df
 
     if nacelle_samples_df.empty:
         nacelle_comment = "Nacelle average not available"
@@ -597,103 +825,33 @@ def process_turbine(t):
         )
         nacelle_comment = generate_nacelle_comment(result["avg_nacelle"])
 
-    # Apply the standalone script's required filters to the POWER CURVE and
-    # its deviation calculation. Keep df_t unchanged for existing nacelle logic.
-    required_deviation_cols = [status_filter_col, wind_std_filter_col, pitch_std_filter_col]
-    missing_deviation_cols = [
-        name for name, col in zip(
-            ["PCurveStsAve", "WindSpeedStd", "BladePitchStd"],
-            required_deviation_cols,
-        ) if col is None
-    ]
+    pc_result = apply_power_curve_logic(
+        df_dashboard,
+        ref_curve,
+        wind_col,
+        power_col,
+        status_filter_col,
+        wind_std_filter_col,
+        pitch_std_filter_col,
+    )
 
-    power_curve_df = df_t.copy()
-    if not missing_deviation_cols:
-        power_curve_df = power_curve_df[
-            (power_curve_df[status_filter_col] == 100)
-            & (power_curve_df[wind_std_filter_col] < 1)
-            & (power_curve_df[pitch_std_filter_col].between(-5, 19, inclusive="both"))
-        ].copy()
-    else:
-        power_curve_df = power_curve_df.iloc[0:0].copy()
+    result["power_curve_df"] = pc_result["power_curve_df"]
+    result["merged"] = pc_result["merged"]
+    result["avg_dev"] = pc_result["avg_dev"]
+    result["missing_deviation_cols"] = pc_result["missing_deviation_cols"]
+    result["deviation_filter_rows"] = pc_result["deviation_filter_rows"]
 
-    # Reference comparison is interpolation-only: exclude wind speeds outside
-    # the reference curve range instead of extrapolating.
-    ref_wind_min = float(ref_curve["WindBin"].min())
-    ref_wind_max = float(ref_curve["WindBin"].max())
-    power_curve_df = power_curve_df[
-        power_curve_df[wind_col].between(ref_wind_min, ref_wind_max, inclusive="both")
-    ].copy()
-
-    result["power_sample_count"] = len(power_curve_df)
-    result["deviation_filter_rows"] = len(power_curve_df)
-    result["deviation_filter_missing_columns"] = missing_deviation_cols
-
-    # Interpolate reference power for each filtered SCADA sample, then calculate
-    # sample-level deviation using the same sign convention as the standalone script.
-    if not power_curve_df.empty:
-        power_curve_df["_ReferencePower_kW"] = np.interp(
-            power_curve_df[wind_col].to_numpy(dtype=float),
-            ref_curve["WindBin"].to_numpy(dtype=float),
-            ref_curve["RefPower"].to_numpy(dtype=float),
-        )
-        power_curve_df["_Deviation_kW"] = (
-            power_curve_df[power_col] - power_curve_df["_ReferencePower_kW"]
-        )
-        power_curve_df["_Deviation_pct"] = np.where(
-            power_curve_df["_ReferencePower_kW"] > 0,
-            100 * power_curve_df["_Deviation_kW"] / power_curve_df["_ReferencePower_kW"],
-            np.nan,
-        )
-        power_curve_df["_WindBin"] = (
-            np.floor(power_curve_df[wind_col] / BIN_SIZE) * BIN_SIZE
-        ).round(6)
-
-        actual = power_curve_df.groupby("_WindBin", as_index=False).agg(
-            AvgPower=(power_col, "mean"),
-            MeanReferencePower=("_ReferencePower_kW", "mean"),
-            Deviation_pct=("_Deviation_pct", "mean"),
-        ).rename(columns={"_WindBin": "WindBin"})
-    else:
-        actual = pd.DataFrame(columns=["WindBin", "AvgPower", "MeanReferencePower", "Deviation_pct"])
-
-    merged = ref_curve.merge(actual, on="WindBin", how="left")
-    merged["AvgPower"] = safe_savgol(merged["AvgPower"], window=7, poly=2)
-    # Deviation is the mean sample-level (Actual - Reference) percentage in each bin.
-    merged["Deviation_%"] = merged["Deviation_pct"]
-    merged = merged.drop(columns=["Deviation_pct"], errors="ignore")
-
-    # Match the standalone script's turbine-level AggregateDeviation_pct:
-    # compare mean actual power with mean reference power. Keep the mean of
-    # sample-level percentages as a separate metric in the detailed summaries.
-    if not power_curve_df.empty:
-        mean_actual = power_curve_df[power_col].mean()
-        mean_reference = power_curve_df["_ReferencePower_kW"].mean()
-        if pd.notna(mean_reference) and mean_reference > 0:
-            avg_dev = 100 * (mean_actual - mean_reference) / mean_reference
-        else:
-            avg_dev = np.nan
-    else:
-        avg_dev = np.nan
-    if pd.isna(avg_dev):
-        avg_dev = None
-
-    result["df_t"] = df_t
-    result["power_curve_df"] = power_curve_df
-    result["merged"] = merged
-    result["avg_dev"] = avg_dev
-
-    if avg_dev is None:
+    if result["avg_dev"] is None:
         result["status"] = "Low Data"
-        if missing_deviation_cols:
+        if result["missing_deviation_cols"]:
             result["comment"] = (
                 "Deviation unavailable: missing required SCADA columns "
-                + ", ".join(missing_deviation_cols)
+                + ", ".join(result["missing_deviation_cols"])
                 + f" | {nacelle_comment}"
             )
-        elif power_curve_df.empty:
+        elif result["power_curve_df"].empty:
             result["comment"] = (
-                "No rows passed deviation filters "
+                "No rows passed required power-curve filters "
                 "(PCurveStsAve=100, WindSpeedStd<1, -5<=BladePitchStd<=19)"
                 + f" | {nacelle_comment}"
             )
@@ -701,29 +859,28 @@ def process_turbine(t):
             result["comment"] = f"Insufficient overlap with reference | {nacelle_comment}"
     else:
         result["status"] = "OK"
-        result["comment"] = f"{generate_comment(avg_dev)} | {nacelle_comment}"
+        result["comment"] = f"{generate_comment(result['avg_dev'])} | {nacelle_comment}"
 
     return result
 
 # =========================
 # PLOT
 # =========================
-def plot_power_curve(df_t, merged, title, dev, comment, power_sample_count):
+def plot_power_curve(power_curve_df, merged, title, dev, comment, deviation_sample_count):
     safe_dev = 0 if dev is None or pd.isna(dev) else dev
     title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
     dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
 
     fig = go.Figure()
-    power_samples_df = df_t.dropna(subset=[wind_col, power_col]).copy()
 
-    if not power_samples_df.empty:
+    if not power_curve_df.empty:
         fig.add_trace(
             go.Scattergl(
-                x=power_samples_df[wind_col],
-                y=power_samples_df[power_col],
+                x=power_curve_df[wind_col],
+                y=power_curve_df[power_col],
                 mode="markers",
                 marker=dict(size=7, color="blue", opacity=0.55, line=dict(width=0.5, color="white")),
-                name=f"Power Samples ({power_sample_count})",
+                name=f"Power Samples ({deviation_sample_count})",
                 hovertemplate=(
                     f"{wind_col}: " + "%{x:.2f} m/s<br>"
                     f"{power_col}: " + "%{y:.2f}<extra>Power Sample</extra>"
@@ -760,12 +917,12 @@ def plot_power_curve(df_t, merged, title, dev, comment, power_sample_count):
         y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 150)
     if merged["AvgPower"].notna().any():
         y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 150)
-    if not power_samples_df.empty and power_samples_df[power_col].notna().any():
-        y_max = max(y_max, float(np.nanmax(power_samples_df[power_col])) + 150)
+    if not power_curve_df.empty and power_curve_df[power_col].notna().any():
+        y_max = max(y_max, float(np.nanmax(power_curve_df[power_col])) + 150)
 
     fig.update_layout(
         title=dict(
-            text=f"{title} | Dev: {dev_txt}% | Power Samples: {power_sample_count} | {comment}",
+            text=f"{title} | Dev: {dev_txt}% | Deviation Samples: {deviation_sample_count} | {comment}",
             font=dict(color=title_color, size=18),
         ),
         xaxis=dict(
@@ -798,13 +955,12 @@ def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle, nacelle_sample_c
     nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
 
     fig = go.Figure()
-    nacelle_samples_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
 
-    if not nacelle_samples_df.empty:
+    if not df_t.empty:
         fig.add_trace(
             go.Scattergl(
-                x=nacelle_samples_df[wind_col],
-                y=nacelle_samples_df[nacelle_col],
+                x=df_t[wind_col],
+                y=df_t[nacelle_col],
                 mode="markers",
                 marker=dict(
                     size=5,
@@ -882,15 +1038,16 @@ for t in turbines_to_show:
             res["turbine"],
             res["avg_dev"],
             res["comment"],
-            res["power_sample_count"],
+            res["deviation_filter_rows"],
         )
         st.plotly_chart(fig_power, use_container_width=True)
         st.caption(f"Power Sample Formula: X = {wind_col}, Y = {power_col}")
-        st.caption(f"Power Samples Count: {res['power_sample_count']}")
+        st.caption(f"Dashboard-filtered Power Samples: {res['dashboard_power_sample_count']}")
+        st.caption(f"Deviation-filtered Power Samples: {res['deviation_filter_rows']}")
 
     with tab2:
         fig_nacelle = plot_nacelle_graph(
-            res["df_t"],
+            res["df_nacelle"],
             res["nacelle_curve"],
             res["turbine"],
             res["avg_nacelle"],
@@ -912,8 +1069,8 @@ for t in turbines_to_show:
             "Deviation_%": None if res["avg_dev"] is None else round(res["avg_dev"], 2),
             "Avg_Nacelle": None if res["avg_nacelle"] is None else round(res["avg_nacelle"], 2),
             "Nacelle_Band": get_nacelle_band(res["avg_nacelle"]),
-            "Power_Samples": res["power_sample_count"],
-            "Deviation_Filtered_Samples": res.get("deviation_filter_rows", 0),
+            "Dashboard_Power_Samples": res["dashboard_power_sample_count"],
+            "Deviation_Filtered_Samples": res["deviation_filter_rows"],
             "Nacelle_Samples": res["nacelle_sample_count"],
             "Status": res["status"],
             "Rows": res["raw_rows"],
@@ -932,125 +1089,42 @@ if not results_df.empty:
     st.dataframe(results_df, use_container_width=True)
 
 # =========================
-# STANDALONE-STYLE ANALYSIS FOR THE SELECTED SITE
-# Uses the same analysis pipeline for any selected site/reference column.
+# DETAILED SITE ANALYSIS
 # =========================
 st.subheader(f"Detailed Power-Curve Analysis — {site}")
-st.caption("The summary tables below use the required status/stability filters, the selected site's reference curve, interpolation without extrapolation, and 0.5 m/s wind bins. Fleet and summary tables cover all turbines detected in the uploaded SCADA file; the individual graph display follows the current turbine selection/view.")
+st.caption(
+    "The summary tables below use the same selected-site reference curve, "
+    "required status/stability filters, interpolation without extrapolation, "
+    "and 0.5 m/s wind bins."
+)
 
-# Process any turbines not already processed in the display loop so fleet
-# summaries cover all turbines in the uploaded SCADA file, not only the ones
-# currently visible in the chosen display mode.
 for _t in all_turbines:
     if _t not in processed_results:
         processed_results[_t] = process_turbine(_t)
 
-analysis_frames = [
-    r["power_curve_df"].copy()
-    for r in processed_results.values()
-    if isinstance(r.get("power_curve_df"), pd.DataFrame) and not r["power_curve_df"].empty
-]
-if analysis_frames:
-    analysis_data = pd.concat(analysis_frames, ignore_index=True)
-else:
-    analysis_data = pd.DataFrame()
+site_analysis = build_site_analysis(
+    processed_results,
+    ref_curve,
+    df,
+    time_col,
+    wind_col,
+    power_col,
+    status_filter_col,
+    wind_std_filter_col,
+    pitch_std_filter_col,
+    site,
+    start_day,
+    end_day,
+)
 
-# Build count stages using date-filtered SCADA data, matching the standalone
-# filter-count logic while making the selected date scope explicit.
-filter_count_rows = [["SCADA records in selected date range", int(len(df))]]
-if status_filter_col is not None:
-    _status_mask = df[status_filter_col].eq(100)
-    filter_count_rows.append(["PCurveStsAve = 100", int(_status_mask.sum())])
-else:
-    _status_mask = pd.Series(False, index=df.index)
-    filter_count_rows.append(["PCurveStsAve = 100 (column missing)", 0])
-if wind_std_filter_col is not None:
-    _wind_std_mask = df[wind_std_filter_col].lt(1)
-else:
-    _wind_std_mask = pd.Series(False, index=df.index)
-if pitch_std_filter_col is not None:
-    _pitch_std_mask = df[pitch_std_filter_col].between(-5, 19, inclusive="both")
-else:
-    _pitch_std_mask = pd.Series(False, index=df.index)
-filter_count_rows.extend([
-    ["After status and WindSpeedStd < 1", int((_status_mask & _wind_std_mask).sum())],
-    ["After all three required filters", int((_status_mask & _wind_std_mask & _pitch_std_mask).sum())],
-    ["Compared with selected reference (after dashboard filters and reference-range check)", int(len(analysis_data))],
-])
-filter_counts_df = pd.DataFrame(filter_count_rows, columns=["Filter Stage", "Record Count"])
+analysis_data = site_analysis["analysis_data"]
+filter_counts_df = site_analysis["filter_counts_df"]
+overall_df = site_analysis["overall_df"]
+wtg_summary_df = site_analysis["wtg_summary_df"]
+fleet_bins_df = site_analysis["fleet_bins_df"]
+wtg_bins_df = site_analysis["wtg_bins_df"]
 
 if not analysis_data.empty:
-    # Standardized names make the exported tables consistent across sites even
-    # when source column names vary between SCADA files.
-    analysis_data["WTG"] = analysis_data["Name"].astype(str)
-    analysis_data["WindSpeed_mps"] = pd.to_numeric(analysis_data[wind_col], errors="coerce")
-    analysis_data["ActualPower_kW"] = pd.to_numeric(analysis_data[power_col], errors="coerce")
-    analysis_data["ReferencePower_kW"] = analysis_data["_ReferencePower_kW"]
-    analysis_data["Deviation_kW"] = analysis_data["_Deviation_kW"]
-    analysis_data["Shortfall_kW"] = -analysis_data["Deviation_kW"]
-    analysis_data["Deviation_pct"] = analysis_data["_Deviation_pct"]
-    analysis_data["WindSpeedBin_mps"] = analysis_data["_WindBin"]
-    analysis_data["DateTime"] = analysis_data[time_col]
-
-    # Per-turbine, per-wind-bin table.
-    wtg_bins_df = analysis_data.groupby(["WTG", "WindSpeedBin_mps"], as_index=False).agg(
-        Samples=("ActualPower_kW", "size"),
-        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-        MeanActualPower_kW=("ActualPower_kW", "mean"),
-        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
-        MeanDeviation_kW=("Deviation_kW", "mean"),
-        MeanShortfall_kW=("Shortfall_kW", "mean"),
-        MeanDeviation_pct=("Deviation_pct", "mean"),
-        PowerStdDev_kW=("ActualPower_kW", "std"),
-    )
-
-    # Fleet-wide bin table across every turbine in the uploaded SCADA file.
-    fleet_bins_df = analysis_data.groupby("WindSpeedBin_mps", as_index=False).agg(
-        Samples=("ActualPower_kW", "size"),
-        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-        MeanActualPower_kW=("ActualPower_kW", "mean"),
-        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
-        MeanDeviation_kW=("Deviation_kW", "mean"),
-        MeanDeviation_pct=("Deviation_pct", "mean"),
-    )
-
-    # Turbine summary includes both percentage metrics from the standalone script.
-    wtg_summary_df = analysis_data.groupby("WTG", as_index=False).agg(
-        ValidSamples=("ActualPower_kW", "size"),
-        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-        MeanActualPower_kW=("ActualPower_kW", "mean"),
-        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
-        MeanDeviation_kW=("Deviation_kW", "mean"),
-        MeanSampleDeviation_pct=("Deviation_pct", "mean"),
-        FirstTimestamp=("DateTime", "min"),
-        LastTimestamp=("DateTime", "max"),
-    )
-    wtg_summary_df["AggregateDeviation_pct"] = np.where(
-        wtg_summary_df["MeanReferencePower_kW"] > 0,
-        100 * (wtg_summary_df["MeanActualPower_kW"] - wtg_summary_df["MeanReferencePower_kW"])
-        / wtg_summary_df["MeanReferencePower_kW"],
-        np.nan,
-    )
-    wtg_summary_df = wtg_summary_df.sort_values("AggregateDeviation_pct", na_position="last")
-
-    ref_min_value = float(ref_curve["WindBin"].min())
-    ref_max_value = float(ref_curve["WindBin"].max())
-    overall_df = pd.DataFrame([
-        ["Selected site", site],
-        ["Selected date range", f"{start_day} to {end_day}"],
-        ["Turbines compared", int(analysis_data["WTG"].nunique())],
-        ["Records compared to reference curve", int(len(analysis_data))],
-        ["Reference curve minimum wind speed (m/s)", ref_min_value],
-        ["Reference curve maximum wind speed (m/s)", ref_max_value],
-        ["Filter 1", "PCurveStsAve = 100"],
-        ["Filter 2", "WindSpeedStd < 1"],
-        ["Filter 3", "-5 <= BladePitchStd <= 19"],
-        ["Wind-speed bin width (m/s)", BIN_SIZE],
-        ["Deviation sign", "Actual power - reference power; negative means below reference"],
-        ["Aggregate turbine deviation", "100 * (mean actual power - mean reference power) / mean reference power"],
-    ], columns=["Metric", "Value"])
-
-    # Fleet power curve plot (same outputs as the standalone analysis).
     fleet_fig = go.Figure()
     fleet_fig.add_trace(go.Scatter(
         x=ref_curve["WindBin"], y=ref_curve["RefPower"], mode="lines",
@@ -1058,13 +1132,18 @@ if not analysis_data.empty:
     fleet_fig.add_trace(go.Scattergl(
         x=analysis_data["WindSpeed_mps"], y=analysis_data["ActualPower_kW"],
         mode="markers", marker=dict(size=5, color="blue", opacity=0.12),
-        name="Filtered 10-min SCADA"))
+        name="Filtered SCADA"))
     fleet_fig.add_trace(go.Scatter(
         x=fleet_bins_df["MeanWindSpeed_mps"], y=fleet_bins_df["MeanActualPower_kW"],
         mode="lines+markers", line=dict(width=2, color="#00a6ff"),
         name="SCADA mean by 0.5 m/s bin"))
-    fleet_fig.update_layout(title=f"{site} — Fleet Power Curve Analysis", xaxis_title="Wind Speed (m/s)",
-                            yaxis_title="Active Power (kW)", height=520, template="plotly_white")
+    fleet_fig.update_layout(
+        title=f"{site} — Fleet Power Curve Analysis",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Active Power (kW)",
+        height=520,
+        template="plotly_white"
+    )
     st.plotly_chart(fleet_fig, use_container_width=True)
 
     deviation_fig = go.Figure()
@@ -1072,15 +1151,19 @@ if not analysis_data.empty:
     deviation_fig.add_trace(go.Scatter(
         x=fleet_bins_df["MeanWindSpeed_mps"], y=fleet_bins_df["MeanDeviation_kW"],
         mode="lines+markers", line=dict(width=2), name="Mean deviation"))
-    deviation_fig.update_layout(title=f"{site} — Power Deviation by Wind-Speed Bin",
-                                xaxis_title="Wind Speed (m/s)",
-                                yaxis_title="Mean Deviation (Actual − Reference, kW)",
-                                height=420, template="plotly_white")
+    deviation_fig.update_layout(
+        title=f"{site} — Power Deviation by Wind-Speed Bin",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Mean Deviation (Actual − Reference, kW)",
+        height=420,
+        template="plotly_white"
+    )
     st.plotly_chart(deviation_fig, use_container_width=True)
 
     tab_overall, tab_filters, tab_wtg, tab_fleet_bins, tab_wtg_bins, tab_details = st.tabs([
         "Overall Summary", "Filter Counts", "WTG Summary", "Fleet Wind Bins", "WTG Wind Bins", "Filtered SCADA Details"
     ])
+
     with tab_overall:
         st.dataframe(overall_df, use_container_width=True, hide_index=True)
     with tab_filters:
@@ -1092,13 +1175,14 @@ if not analysis_data.empty:
     with tab_wtg_bins:
         st.dataframe(wtg_bins_df, use_container_width=True, hide_index=True)
     with tab_details:
-        detail_cols = ["WTG", "DateTime", status_filter_col, wind_std_filter_col, pitch_std_filter_col,
-                       "WindSpeed_mps", "ActualPower_kW", "ReferencePower_kW", "Deviation_kW",
-                       "Shortfall_kW", "Deviation_pct", "WindSpeedBin_mps"]
+        detail_cols = [
+            "WTG", "DateTime", status_filter_col, wind_std_filter_col, pitch_std_filter_col,
+            "WindSpeed_mps", "ActualPower_kW", "ReferencePower_kW", "Deviation_kW",
+            "Shortfall_kW", "Deviation_pct", "WindSpeedBin_mps"
+        ]
         detail_cols = [c for c in detail_cols if c is not None and c in analysis_data.columns]
         st.dataframe(analysis_data[detail_cols], use_container_width=True, hide_index=True)
 
-    # Download all standalone-style analysis tables as one workbook.
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         overall_df.to_excel(writer, sheet_name="Overall Summary", index=False)
@@ -1106,13 +1190,19 @@ if not analysis_data.empty:
         wtg_summary_df.to_excel(writer, sheet_name="WTG Summary", index=False)
         fleet_bins_df.to_excel(writer, sheet_name="Fleet Wind Bins", index=False)
         wtg_bins_df.to_excel(writer, sheet_name="WTG Wind Bins", index=False)
-        detail_cols = ["WTG", "DateTime", status_filter_col, wind_std_filter_col, pitch_std_filter_col,
-                       "WindSpeed_mps", "ActualPower_kW", "ReferencePower_kW", "Deviation_kW",
-                       "Shortfall_kW", "Deviation_pct", "WindSpeedBin_mps"]
+
+        detail_cols = [
+            "WTG", "DateTime", status_filter_col, wind_std_filter_col, pitch_std_filter_col,
+            "WindSpeed_mps", "ActualPower_kW", "ReferencePower_kW", "Deviation_kW",
+            "Shortfall_kW", "Deviation_pct", "WindSpeedBin_mps"
+        ]
         detail_cols = [c for c in detail_cols if c is not None and c in analysis_data.columns]
+
         analysis_data[detail_cols].to_excel(writer, sheet_name="Filtered SCADA Details", index=False)
-        ref_curve.rename(columns={"WindBin": "ReferenceWindSpeed_mps", "RefPower": "ReferencePower_kW"}).to_excel(
-            writer, sheet_name="Reference Curve", index=False)
+        ref_curve.rename(
+            columns={"WindBin": "ReferenceWindSpeed_mps", "RefPower": "ReferencePower_kW"}
+        ).to_excel(writer, sheet_name="Reference Curve", index=False)
+
     excel_buffer.seek(0)
     st.download_button(
         "Download Complete Power-Curve Analysis (Excel)",
@@ -1175,7 +1265,8 @@ try:
             line = (
                 f"{row['Turbine']} | Dev: {dev_text}% | "
                 f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
-                f"Power Samples: {row['Power_Samples']} | "
+                f"Dashboard Power Samples: {row['Dashboard_Power_Samples']} | "
+                f"Deviation Samples: {row['Deviation_Filtered_Samples']} | "
                 f"Nacelle Samples: {row['Nacelle_Samples']} | "
                 f"{row['Status']}"
             )
