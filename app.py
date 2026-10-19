@@ -678,20 +678,34 @@ m4.metric("Reference curve", selected_curve)
 # =========================
 available_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
 
-selected_wtgs_view = st.multiselect(
-    "Select turbines to display in tables and turbine-focused views",
+default_wtgs = available_wtgs[: min(8, len(available_wtgs))]
+selected_wtgs = st.multiselect(
+    "Select turbines to view",
     options=available_wtgs,
-    default=available_wtgs[: min(10, len(available_wtgs))] if available_wtgs else [],
-    help="For better performance, the default selection is limited. Add more turbines if needed.",
+    default=default_wtgs,
+    help="Default selection is limited for better performance. Add more turbines if needed.",
 )
 
-if not selected_wtgs_view:
+if not selected_wtgs:
     st.warning("Please select at least one turbine to display.")
     st.stop()
 
-filtered_view = results["filtered"][results["filtered"]["WTG"].isin(selected_wtgs_view)].copy()
-wtg_summary_view = results["wtg_summary"][results["wtg_summary"]["WTG"].isin(selected_wtgs_view)].copy()
-wtg_bins_view = results["wtg_bins"][results["wtg_bins"]["WTG"].isin(selected_wtgs_view)].copy()
+filtered_view = results["filtered"][results["filtered"]["WTG"].isin(selected_wtgs)].copy()
+wtg_summary_view = results["wtg_summary"][results["wtg_summary"]["WTG"].isin(selected_wtgs)].copy()
+wtg_bins_view = results["wtg_bins"][results["wtg_bins"]["WTG"].isin(selected_wtgs)].copy()
+
+fleet_bins_view = (
+    filtered_view.groupby("WindSpeedBin_mps")
+    .agg(
+        Samples=("ActualPower_kW", "size"),
+        MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+        MeanActualPower_kW=("ActualPower_kW", "mean"),
+        MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+        MeanDeviation_kW=("Deviation_kW", "mean"),
+        MeanDeviation_pct=("Deviation_pct", "mean"),
+    )
+    .reset_index()
+)
 
 # =========================
 # SUMMARY TABLES
@@ -713,78 +727,24 @@ with right_col:
 st.subheader("Fleet charts")
 
 fleet_power_fig = make_fleet_power_curve_plotly(
-    results["ref"], results["filtered"], results["fleet_bins"]
+    results["ref"], filtered_view, fleet_bins_view
 )
 st.plotly_chart(fleet_power_fig, width="stretch")
 
-fleet_dev_fig = make_fleet_deviation_plotly(results["fleet_bins"])
+fleet_dev_fig = make_fleet_deviation_plotly(fleet_bins_view)
 st.plotly_chart(fleet_dev_fig, width="stretch")
 
 # =========================
-# PER-WTG VIEW
+# SELECTED WTG SUMMARY
 # =========================
-st.subheader("Per-WTG analysis")
-
-selected_wtg_view = st.selectbox(
-    "Select one WTG for detailed power curve view",
-    selected_wtgs_view,
-)
-
-filtered_wtg = filtered_view[filtered_view["WTG"] == selected_wtg_view].copy()
-wtg_bins_single = wtg_bins_view[wtg_bins_view["WTG"] == selected_wtg_view].copy()
-wtg_summary_single = wtg_summary_view[wtg_summary_view["WTG"] == selected_wtg_view].copy()
-
-wtg_fig = make_wtg_power_curve_plotly(
-    results["ref"], filtered_wtg, wtg_bins_single, selected_wtg_view
-)
-st.plotly_chart(wtg_fig, width="stretch")
-
-if not wtg_summary_single.empty:
-    st.markdown("#### Selected WTG summary")
-    st.dataframe(wtg_summary_single, width="stretch", hide_index=True)
-
-# =========================
-# MULTI-WTG COMPARISON
-# =========================
-st.subheader("Multi-WTG comparison")
-
-default_compare = selected_wtgs_view[: min(5, len(selected_wtgs_view))]
-selected_compare_wtgs = st.multiselect(
-    "Select WTGs to compare on one chart",
-    options=selected_wtgs_view,
-    default=default_compare,
-    help="Keep this selection small for better performance.",
-)
-
-if selected_compare_wtgs:
-    multi_fig = make_multi_wtg_comparison_plot(
-        {
-            "wtg_bins": wtg_bins_view,
-            "ref": results["ref"],
-        },
-        selected_compare_wtgs,
-    )
-    st.plotly_chart(multi_fig, width="stretch")
-
-# =========================
-# RANKING
-# =========================
-st.subheader("Turbine ranking")
-
-ranking_df = wtg_summary_view[
-    ["WTG", "ValidSamples", "MeanActualPower_kW", "MeanReferencePower_kW", "AggregateDeviation_pct"]
-].copy()
-ranking_df = ranking_df.sort_values("AggregateDeviation_pct", na_position="last")
-st.dataframe(ranking_df, width="stretch", hide_index=True)
+st.subheader("Selected WTG summary")
+st.dataframe(wtg_summary_view, width="stretch", hide_index=True)
 
 # =========================
 # DATA TABLES
 # =========================
-with st.expander("Show selected WTG summary"):
-    st.dataframe(wtg_summary_view, width="stretch", hide_index=True)
-
-with st.expander("Show fleet wind bin summary"):
-    st.dataframe(results["fleet_bins"], width="stretch", hide_index=True)
+with st.expander("Show selected turbines wind bin summary"):
+    st.dataframe(fleet_bins_view, width="stretch", hide_index=True)
 
 with st.expander("Show selected WTG wind bin summary"):
     st.dataframe(wtg_bins_view, width="stretch", hide_index=True)
@@ -805,7 +765,7 @@ with st.expander("Show filtered SCADA sample"):
         "WindSpeedBin_mps",
     ]
     st.dataframe(
-        filtered_view[preview_cols].head(300),
+        filtered_view[preview_cols].head(200),
         width="stretch",
         hide_index=True,
     )
@@ -835,9 +795,9 @@ with d2:
 
 with d3:
     st.download_button(
-        "Download fleet bins CSV",
-        data=to_csv_bytes(results["fleet_bins"]),
-        file_name="fleet_bins_power_curve.csv",
+        "Download selected turbines bins CSV",
+        data=to_csv_bytes(fleet_bins_view),
+        file_name="selected_turbines_bins_power_curve.csv",
         mime="text/csv",
     )
 
@@ -850,7 +810,6 @@ if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
     pdf_figures = [
         ("Fleet Power Curve Comparison", fleet_power_fig),
         ("Fleet Deviation by Wind-Speed Bin", fleet_dev_fig),
-        (f"{selected_wtg_view} Power Curve Comparison", wtg_fig),
     ]
 
     try:
@@ -858,7 +817,7 @@ if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
             selected_curve,
             date_text,
             pdf_figures,
-            ranking_df,
+            wtg_summary_view,
         )
         st.download_button(
             label="Download PDF Report",
