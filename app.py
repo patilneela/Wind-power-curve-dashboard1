@@ -176,13 +176,7 @@ def build_site_reference_map(ref_raw):
     return site_map
 
 
-def build_power_curve_base_df(
-    df_in,
-    wind_col,
-    power_col,
-    wind_min,
-    wind_max,
-):
+def build_power_curve_base_df(df_in, wind_col, power_col, wind_min, wind_max):
     df_out = df_in.dropna(subset=[wind_col, power_col]).copy()
     if df_out.empty:
         return df_out
@@ -654,8 +648,8 @@ wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 with st.expander("Applied Formula and Filtering Logic", expanded=False):
     st.markdown("### Selected Site Logic")
     st.markdown(f"- The power-curve calculation uses the selected site's reference column: **{site}**.")
-    st.markdown("- Old power-curve logic and nacelle logic have been removed.")
     st.markdown("- Only the new standalone-style power-curve logic is used.")
+    st.markdown("- The detailed site-level power curve is shown only once below, not repeated twice.")
 
     st.markdown("### Required Power-Curve Filters")
     st.code(
@@ -677,22 +671,6 @@ with st.expander("Applied Formula and Filtering Logic", expanded=False):
                 f"{power_col} is not null",
                 f"{wind_min} <= {wind_col} <= {wind_max}",
                 f"{power_col} >= 0",
-            ]
-        ),
-        language="python",
-    )
-
-    st.markdown("### Power Curve Formula")
-    st.code(
-        "\n".join(
-            [
-                "ReferencePower = linear interpolation from selected site curve",
-                "No extrapolation outside reference wind-speed range",
-                f"WindSpeedBin = floor({wind_col} / {BIN_SIZE}) * {BIN_SIZE}",
-                "Deviation_kW = ActualPower - ReferencePower",
-                "Shortfall_kW = -Deviation_kW",
-                "Deviation_pct = 100 * Deviation_kW / ReferencePower",
-                "AggregateDeviation_pct = 100 * (mean ActualPower - mean ReferencePower) / mean ReferencePower",
             ]
         ),
         language="python",
@@ -786,7 +764,7 @@ def plot_power_curve(power_curve_df, merged, title, deviation_sample_count):
                 x=merged["WindBin"],
                 y=merged["RefPower"],
                 mode="lines",
-                line=dict(color="#d62728", width=2.5, dash="dash"),
+                line=dict(color="#d62728", width=3, dash="dash"),
                 name="Reference Power Curve",
                 hovertemplate="Wind Speed: %{x:.2f} m/s<br>Reference Power: %{y:.2f} kW<extra></extra>",
             )
@@ -799,11 +777,11 @@ def plot_power_curve(power_curve_df, merged, title, deviation_sample_count):
                 y=power_curve_df[power_col],
                 mode="markers",
                 marker=dict(
-                    size=5,
-                    color="rgba(99, 102, 241, 0.18)",
+                    size=8,
+                    color="rgba(124, 124, 255, 0.18)",
                     line=dict(width=0),
                 ),
-                name=f"Filtered 10-min SCADA ({deviation_sample_count})",
+                name="Filtered 10-min SCADA",
                 hovertemplate=(
                     f"{wind_col}: " + "%{x:.2f} m/s<br>"
                     f"{power_col}: " + "%{y:.2f} kW<extra>Filtered SCADA</extra>"
@@ -811,15 +789,18 @@ def plot_power_curve(power_curve_df, merged, title, deviation_sample_count):
             )
         )
 
-    avg_curve = merged.dropna(subset=["AvgPower"]).copy() if merged is not None and not merged.empty else pd.DataFrame()
+    avg_curve = pd.DataFrame()
+    if merged is not None and not merged.empty:
+        avg_curve = merged.dropna(subset=["AvgPower"]).copy()
+
     if not avg_curve.empty:
         fig.add_trace(
             go.Scatter(
                 x=avg_curve["WindBin"],
                 y=avg_curve["AvgPower"],
                 mode="lines+markers",
-                line=dict(color="#1f77b4", width=2.5),
-                marker=dict(size=7, color="#1f77b4"),
+                line=dict(color="#1f77b4", width=4),
+                marker=dict(size=9, color="#1f77b4"),
                 name="SCADA mean by 0.5 m/s bin",
                 hovertemplate="Wind Speed Bin: %{x:.2f} m/s<br>Average Power: %{y:.2f} kW<extra></extra>",
             )
@@ -827,48 +808,65 @@ def plot_power_curve(power_curve_df, merged, title, deviation_sample_count):
 
     y_max = 3500
     if merged is not None and not merged.empty and merged["RefPower"].notna().any():
-        y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 150)
+        y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 120)
     if merged is not None and not merged.empty and merged["AvgPower"].notna().any():
-        y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 150)
+        y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 120)
     if not power_curve_df.empty and power_curve_df[power_col].notna().any():
-        y_max = max(y_max, float(np.nanmax(power_curve_df[power_col])) + 150)
+        y_max = max(y_max, float(np.nanmax(power_curve_df[power_col])) + 120)
 
     fig.update_layout(
-        title=f"{title} - Power Curve Analysis",
+        title=dict(
+            text=f"{title} - Power Curve Analysis",
+            x=0.02,
+            xanchor="left",
+            font=dict(size=22, color="#2f3542"),
+        ),
         xaxis=dict(
             title="Wind Speed (m/s)",
             range=[3, 15],
             showgrid=True,
-            gridcolor="rgba(0,0,0,0.12)",
+            gridcolor="#dfe6f3",
+            gridwidth=1.2,
             zeroline=False,
+            showline=False,
+            tickfont=dict(size=12, color="#7b8499"),
+            title_font=dict(size=16, color="#7b8499"),
         ),
         yaxis=dict(
             title="Active Power (kW)",
             range=[0, y_max],
             showgrid=True,
-            gridcolor="rgba(0,0,0,0.12)",
+            gridcolor="#dfe6f3",
+            gridwidth=1.2,
             zeroline=False,
+            showline=False,
+            tickfont=dict(size=12, color="#7b8499"),
+            title_font=dict(size=16, color="#7b8499"),
         ),
-        height=520,
-        template="plotly_white",
+        height=700,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
         hovermode="closest",
         legend=dict(
             orientation="v",
-            x=0.01,
-            y=0.99,
-            bgcolor="rgba(255,255,255,0.85)"
+            x=1.02,
+            y=1.0,
+            bgcolor="rgba(255,255,255,0)",
+            font=dict(size=14),
         ),
-        margin=dict(l=60, r=40, t=70, b=60),
+        margin=dict(l=90, r=260, t=90, b=80),
     )
 
     return fig
 
 # =========================
-# DISPLAY
+# DISPLAY - EACH TURBINE ONCE
 # =========================
 results = []
 figures = []
 processed_results = {}
+
+st.subheader("Turbine Power Curves")
 
 for t in turbines_to_show:
     res = process_turbine(t)
@@ -915,13 +913,12 @@ if not results_df.empty:
     st.dataframe(results_df, use_container_width=True)
 
 # =========================
-# DETAILED SITE ANALYSIS
+# DETAILED SITE ANALYSIS - ONLY ONE SITE LEVEL POWER CURVE
 # =========================
 st.subheader(f"Detailed Power-Curve Analysis — {site}")
 st.caption(
-    "The summary tables below use only the new standalone-style power-curve logic: "
-    "required filters, selected-site reference interpolation, no extrapolation, "
-    "and 0.5 m/s wind-speed bins."
+    "Below is a single site-level power curve for all turbines combined. "
+    "It is shown only once."
 )
 
 for _t in all_turbines:
@@ -956,30 +953,61 @@ if not analysis_data.empty:
         x=ref_curve_raw["ReferenceWindSpeed_mps"],
         y=ref_curve_raw["ReferencePower_kW"],
         mode="lines",
-        line=dict(color="#d62728", width=2.5, dash="dash"),
+        line=dict(color="#d62728", width=3, dash="dash"),
         name="Reference Power Curve",
     ))
     fleet_fig.add_trace(go.Scattergl(
         x=analysis_data["WindSpeed_mps"],
         y=analysis_data["ActualPower_kW"],
         mode="markers",
-        marker=dict(size=5, color="rgba(99, 102, 241, 0.18)", line=dict(width=0)),
+        marker=dict(size=8, color="rgba(124, 124, 255, 0.18)", line=dict(width=0)),
         name="Filtered 10-min SCADA",
     ))
     fleet_fig.add_trace(go.Scatter(
         x=fleet_bins_df["MeanWindSpeed_mps"],
         y=fleet_bins_df["MeanActualPower_kW"],
         mode="lines+markers",
-        line=dict(color="#1f77b4", width=2.5),
-        marker=dict(size=7, color="#1f77b4"),
+        line=dict(color="#1f77b4", width=4),
+        marker=dict(size=9, color="#1f77b4"),
         name="SCADA mean by 0.5 m/s bin",
     ))
     fleet_fig.update_layout(
-        title=f"{site} - Power Curve Analysis",
-        xaxis_title="Wind Speed (m/s)",
-        yaxis_title="Active Power (kW)",
-        height=520,
-        template="plotly_white"
+        title=dict(
+            text=f"{site} - Power Curve Analysis",
+            x=0.02,
+            xanchor="left",
+            font=dict(size=22, color="#2f3542"),
+        ),
+        xaxis=dict(
+            title="Wind Speed (m/s)",
+            showgrid=True,
+            gridcolor="#dfe6f3",
+            gridwidth=1.2,
+            zeroline=False,
+            tickfont=dict(size=12, color="#7b8499"),
+            title_font=dict(size=16, color="#7b8499"),
+        ),
+        yaxis=dict(
+            title="Active Power (kW)",
+            showgrid=True,
+            gridcolor="#dfe6f3",
+            gridwidth=1.2,
+            zeroline=False,
+            tickfont=dict(size=12, color="#7b8499"),
+            title_font=dict(size=16, color="#7b8499"),
+        ),
+        height=700,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        template="plotly_white",
+        legend=dict(
+            orientation="v",
+            x=1.02,
+            y=1.0,
+            bgcolor="rgba(255,255,255,0)",
+            font=dict(size=14),
+        ),
+        margin=dict(l=90, r=260, t=90, b=80),
     )
     st.plotly_chart(fleet_fig, use_container_width=True)
 
@@ -989,7 +1017,8 @@ if not analysis_data.empty:
         x=fleet_bins_df["MeanWindSpeed_mps"],
         y=fleet_bins_df["MeanDeviation_kW"],
         mode="lines+markers",
-        line=dict(width=2),
+        line=dict(width=3, color="#1f77b4"),
+        marker=dict(size=8, color="#1f77b4"),
         name="Mean deviation",
     ))
     deviation_fig.update_layout(
