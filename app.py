@@ -1,17 +1,29 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from scipy.signal import savgol_filter
-from datetime import timedelta
-import os
+from pathlib import Path
 import io
+import os
 
-from reportlab.lib.pagesizes import landscape, A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
-st.set_page_config(layout="wide")
+# Optional PDF export support
+try:
+    import kaleido  # noqa: F401
+    KALEIDO_AVAILABLE = True
+except Exception:
+    KALEIDO_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
+
+st.set_page_config(page_title="Power Curve Analytics Dashboard", layout="wide")
 
 # =========================
 # LOGIN
@@ -49,841 +61,791 @@ if st.sidebar.button("Logout", key="logout_btn"):
     st.rerun()
 
 # =========================
-# SAFE KALEIDO CHECK
+# CONSTANTS
 # =========================
-try:
-    import kaleido  # noqa: F401
-    KALEIDO_AVAILABLE = True
-except Exception:
-    KALEIDO_AVAILABLE = False
+WTG_COL = "Name"
+TIME_COL = "Time"
+STATUS_COL = "PCurveStsAve"
+WIND_SPEED_COL = "WindSpeedAve"
+WIND_STD_COL = "WindSpeedStd"
+PITCH_STD_COL = "BladePitchStd"
+POWER_COL = "ActivePWAve"
+BIN_WIDTH = 0.5
 
-# =========================
-# PATHS
-# =========================
-BASE_DIR = os.path.dirname(__file__)
-logo_path = os.path.join(BASE_DIR, "Envision.png")
-BIN_SIZE = 0.5
+REQUIRED_SCADA_COLUMNS = [
+    WTG_COL,
+    TIME_COL,
+    STATUS_COL,
+    WIND_SPEED_COL,
+    WIND_STD_COL,
+    PITCH_STD_COL,
+    POWER_COL,
+]
+
+BASE_DIR = Path(__file__).resolve().parent
+UPLOADS_DIR = BASE_DIR / "uploads"
+DEFAULT_CSV_PATH = UPLOADS_DIR / "EN-156-3.3_20260801_20260826_ten_minutes-1792412779244.csv"
+DEFAULT_XLSX_PATH = UPLOADS_DIR / "All Sites Specific Power Curve data_ENV1-1792412779249.xlsx"
+LOGO_PATH = BASE_DIR / "Envision.png"
 
 # =========================
 # HELPERS
 # =========================
-def normalize_text(s):
-    if pd.isna(s):
-        return ""
-    return (
-        str(s).strip().lower()
-        .replace("-", "")
-        .replace("_", "")
-        .replace(",", "")
-        .replace(" ", "")
-        .replace("\n", "")
-        .replace("(", "")
-        .replace(")", "")
-        .replace(".", "")
-    )
-
-
-def detect_column(columns, candidates):
-    normalized_map = {c: normalize_text(c) for c in columns}
-
-    for candidate in candidates:
-        candidate_norm = normalize_text(candidate)
-        exact = [col for col, norm in normalized_map.items() if norm == candidate_norm]
-        if exact:
-            return exact[0]
-
-    for candidate in candidates:
-        candidate_norm = normalize_text(candidate)
-        contains = [col for col, norm in normalized_map.items() if candidate_norm in norm]
-        if contains:
-            return contains[0]
-
-    return None
-
-
-def compute_preset_range(preset: str, today_ts: pd.Timestamp):
-    today_date = today_ts.normalize().date()
-
-    if preset == "Today":
-        return today_date, today_date
-    if preset == "This Week":
-        monday = today_date - timedelta(days=today_ts.weekday())
-        return monday, today_date
-    if preset == "Last Week":
-        this_monday = today_date - timedelta(days=today_ts.weekday())
-        start = this_monday - timedelta(days=7)
-        end = this_monday - timedelta(days=1)
-        return start, end
-    if preset == "This Month":
-        start = today_date.replace(day=1)
-        return start, today_date
-    if preset == "Last Month":
-        first_this_month = today_date.replace(day=1)
-        last_month_end = first_this_month - timedelta(days=1)
-        start = last_month_end.replace(day=1)
-        return start, last_month_end
-    return None
-
-
-def safe_savgol(series, window=7, poly=2):
-    s = series.copy()
-    valid = s.notna()
-
-    valid_count = valid.sum()
-    if valid_count < 5:
-        return s
-
-    if window > valid_count:
-        window = valid_count if valid_count % 2 == 1 else valid_count - 1
-
-    if window < 3:
-        return s
-
-    if poly >= window:
-        poly = max(1, window - 1)
-
-    try:
-        s.loc[valid] = savgol_filter(s.loc[valid], window, poly)
-    except Exception:
-        pass
-    return s
-
-
-def build_metric_curve(df_t, wind_col, metric_col, smooth=False, smooth_window=7, smooth_poly=2):
-    tmp = df_t[[wind_col, metric_col]].dropna().copy()
-
-    if tmp.empty:
-        return pd.DataFrame(columns=["WindBin", "AvgMetric"])
-
-    tmp["WindBin"] = (np.floor(tmp[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
-    out = tmp.groupby("WindBin", as_index=False).agg(AvgMetric=(metric_col, "mean"))
-
-    if smooth and not out.empty:
-        out["AvgMetric"] = safe_savgol(out["AvgMetric"], window=smooth_window, poly=smooth_poly)
-
-    return out
-
-
-def get_nacelle_band(avg_nacelle):
-    if avg_nacelle is None or pd.isna(avg_nacelle):
-        return "NA"
-    if 0 <= avg_nacelle < 60:
-        return "0-60"
-    elif 60 <= avg_nacelle < 120:
-        return "60-120"
-    elif 120 <= avg_nacelle < 180:
-        return "120-180"
-    elif 180 <= avg_nacelle < 240:
-        return "180-240"
-    elif 240 <= avg_nacelle <= 360:
-        return "240-360"
-    return "Out of Range"
-
-
-def generate_nacelle_comment(avg_nacelle):
-    if avg_nacelle is None or pd.isna(avg_nacelle):
-        return "Nacelle average not available"
-    band = get_nacelle_band(avg_nacelle)
-    val = round(avg_nacelle, 2)
-    if band == "Out of Range":
-        return f"NacelleAvg: {val}° → Out of configured range"
-    return f"NacelleAvg: {val}° → Band {band}"
-
-
-def generate_comment(dev):
-    if dev is None or pd.isna(dev):
-        return "Deviation not available"
-
-    dev = round(dev, 2)
-
-    if dev < -72:
-        return f"Dev: {dev}% → Extreme issue (Data unreliable)"
-    elif dev < -8:
-        return f"Dev: {dev}% → Severe underperformance (Blade/Dust/Yaw issue)"
-    elif dev < -2:
-        return f"Dev: {dev}% → Underperformance"
-    elif dev > 72:
-        return f"Dev: {dev}% → Abnormal high (Sensor/Data issue)"
-    elif dev > 8:
-        return f"Dev: {dev}% → High overperformance"
-    elif dev > 2:
-        return f"Dev: {dev}% → Slight overperformance"
-    else:
-        return f"Dev: {dev}% → Normal performance"
-
-
-# =========================
-# UI HEADER
-# =========================
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    if os.path.exists(logo_path):
-        st.image(logo_path, width=300)
-
-st.title("Power Curve Analytics Dashboard")
-
-# =========================
-# FILE UPLOADS
-# =========================
-st.sidebar.subheader("Upload Files")
-scada_file = st.sidebar.file_uploader("Upload 1-min / 10-min SCADA CSV", type=["csv"], key="scada_file")
-ref_file = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"], key="ref_file")
-
-if scada_file is None:
-    st.warning("Please upload SCADA/static CSV file.")
-    st.stop()
-
-if ref_file is None:
-    st.warning("Please upload reference Excel file.")
-    st.stop()
-
-# =========================
-# LOAD SCADA
-# =========================
-@st.cache_data(show_spinner=True)
-def load_scada(file):
-    chunks = pd.read_csv(file, chunksize=200000, low_memory=False, engine="c")
-    df_local = pd.concat(chunks, ignore_index=True)
-    df_local.columns = df_local.columns.str.strip()
-    return df_local
-
-
-with st.spinner("Loading SCADA file..."):
-    df = load_scada(scada_file)
-
-if "Name" not in df.columns:
-    st.error("SCADA file must contain 'Name' column.")
-    st.stop()
-
-available_columns = list(df.columns)
-
-auto_time = detect_column(available_columns, ["Time", "Timestamp", "DateTime", "LocalTime"])
-auto_wind = detect_column(available_columns, ["WindSpeedAve", "Wind Speed Ave", "WindSpeed", "Wind"])
-auto_power = detect_column(
-    available_columns,
-    [
-        "ActivePWAve",
-        "ActivePowerAve",
-        "PowerAve",
-        "ActivePower",
-        "Power",
-        "GrdProdPwrAve",
-        "GrdProdPwrAct",
-        "WTGActivePowerAve",
-        "OutputPowerAve",
-    ],
-)
-auto_pitch = detect_column(available_columns, ["BladePitchStd", "PitchAve", "Pitch"])
-auto_nacelle = detect_column(available_columns, ["NacellePositionAve", "NacelleAve", "Nacelle Position"])
-
-st.sidebar.markdown("### Column Mapping")
-
-time_col = st.sidebar.selectbox(
-    "Time Column",
-    available_columns,
-    index=available_columns.index(auto_time) if auto_time in available_columns else 0,
-)
-wind_col = st.sidebar.selectbox(
-    "Wind Column",
-    available_columns,
-    index=available_columns.index(auto_wind) if auto_wind in available_columns else 0,
-)
-power_col = st.sidebar.selectbox(
-    "Power Column",
-    available_columns,
-    index=available_columns.index(auto_power) if auto_power in available_columns else 0,
-)
-pitch_col = st.sidebar.selectbox(
-    "Pitch Column",
-    available_columns,
-    index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0,
-)
-nacelle_col = st.sidebar.selectbox(
-    "Nacelle Column",
-    available_columns,
-    index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0,
-)
-
-df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-df[wind_col] = pd.to_numeric(df[wind_col], errors="coerce")
-df[power_col] = pd.to_numeric(df[power_col], errors="coerce")
-df[pitch_col] = pd.to_numeric(df[pitch_col], errors="coerce")
-df[nacelle_col] = pd.to_numeric(df[nacelle_col], errors="coerce")
-df["Name"] = df["Name"].astype(str).str.strip()
-
-df = df.dropna(subset=["Name"])
-
-if df.empty:
-    st.warning("No valid SCADA rows after parsing.")
-    st.stop()
-
-# =========================
-# DATE FILTER
-# =========================
-st.sidebar.markdown("### Date Range")
-max_ts = df[time_col].max()
-base_date = max_ts.normalize().date() if pd.notna(max_ts) else pd.Timestamp.today().date()
-
-DEFAULT_START = base_date - timedelta(days=15)
-DEFAULT_END = base_date
-
-if "manual_start_date" not in st.session_state:
-    st.session_state.manual_start_date = DEFAULT_START
-if "manual_end_date" not in st.session_state:
-    st.session_state.manual_end_date = DEFAULT_END
-
-date_option = st.sidebar.selectbox(
-    "Date Option",
-    ["Clear", "Today", "This Week", "This Month", "Last Week", "Last Month", "Manual (Calendar)"],
-    key="date_option",
-)
-
-if date_option == "Manual (Calendar)":
-    start_day = st.sidebar.date_input("Start Date", value=st.session_state.manual_start_date, key="manual_start_date")
-    end_day = st.sidebar.date_input("End Date", value=st.session_state.manual_end_date, key="manual_end_date")
-elif date_option == "Clear":
-    st.session_state.manual_start_date = DEFAULT_START
-    st.session_state.manual_end_date = DEFAULT_END
-    start_day = DEFAULT_START
-    end_day = DEFAULT_END
-else:
-    rng = compute_preset_range(date_option, pd.Timestamp.today())
-    start_day, end_day = rng if rng else (DEFAULT_START, DEFAULT_END)
-
-df["_date_only"] = df[time_col].dt.date
-df = df[(df["_date_only"] >= start_day) & (df["_date_only"] <= end_day)].drop(columns=["_date_only"])
-
-if df.empty:
-    st.warning("No SCADA data available for selected date range.")
-    st.stop()
-
-# =========================
-# TURBINES
-# =========================
-all_turbines = sorted(df["Name"].dropna().unique())
-
-mode = st.sidebar.radio(
-    "Select View",
-    ["Single Turbine", "Compare Turbines", "Show All Turbines"],
-    key="mode_radio",
-)
-
-if mode == "Single Turbine":
-    turbines_to_show = [st.sidebar.selectbox("Select Turbine", all_turbines, key="single_turbine")]
-elif mode == "Compare Turbines":
-    turbines_to_show = st.sidebar.multiselect("Select Turbines", all_turbines, default=all_turbines, key="compare_turbines")
-else:
-    turbines_to_show = all_turbines
-
-if not turbines_to_show:
-    st.warning("Please select at least one turbine.")
-    st.stop()
-
-# =========================
-# LOAD REFERENCE
-# =========================
-@st.cache_data
-def load_reference(reference_file):
-    ref_raw = pd.read_excel(reference_file, sheet_name="Power Curve", header=None)
-    site_headers = ref_raw.iloc[2].copy()
-    site_names = [str(x) for x in site_headers[1:].tolist()]
-    return ref_raw, site_names
-
-
-try:
-    ref_raw, ref_site_names = load_reference(ref_file)
-except Exception as e:
-    st.error("Unable to read reference Excel / Power Curve sheet.")
-    st.code(str(e))
-    st.stop()
-
-site = st.sidebar.selectbox("Select Site / Reference Column", ref_site_names)
-
-
-def load_reference_curve(ref_raw, selected_site):
-    site_headers = ref_raw.iloc[2].copy()
-    wind_series = pd.to_numeric(ref_raw.iloc[3:, 0], errors="coerce")
-
-    matched_col = None
-    for col_idx in range(1, ref_raw.shape[1]):
-        header_text_raw = site_headers.iloc[col_idx]
-        if str(header_text_raw).strip() == selected_site:
-            matched_col = col_idx
-            break
-
-    if matched_col is None:
-        st.error("Selected site not found in reference sheet.")
-        st.stop()
-
-    ref_power = pd.to_numeric(ref_raw.iloc[3:, matched_col], errors="coerce")
-
-    ref = pd.DataFrame({"WindSpeed": wind_series, "RefPower": ref_power}).dropna()
-    ref = ref[(ref["WindSpeed"] >= 3) & (ref["WindSpeed"] <= 15)]
-
-    if ref.empty:
-        st.error("No valid reference data found.")
-        st.stop()
-
-    wind_bins = np.arange(3, 15.5, BIN_SIZE)
-    ref_interp = np.interp(wind_bins, ref["WindSpeed"], ref["RefPower"])
-
-    return pd.DataFrame({"WindBin": wind_bins, "RefPower": ref_interp})
-
-
-ref_curve = load_reference_curve(ref_raw, site)
-
-st.subheader(f"Reference Selected: {site}")
-st.markdown(f"Date Range: {start_day} → {end_day}")
-
-# =========================
-# FILTERS
-# =========================
-st.sidebar.markdown("### Filters")
-pitch_min = st.sidebar.number_input("Pitch Min", value=-5.0)
-pitch_max = st.sidebar.number_input("Pitch Max", value=16.0)
-nacelle_min = st.sidebar.number_input("Nacelle Min", value=0.0)
-nacelle_max = st.sidebar.number_input("Nacelle Max", value=360.0)
-wind_min = st.sidebar.number_input("Wind Min", value=3.0)
-wind_max = st.sidebar.number_input("Wind Max", value=15.0)
-
-# =========================
-# FORMULA / LOGIC DISPLAY
-# =========================
-with st.expander("Applied Formula and Filtering Logic", expanded=False):
-    st.markdown("### Scatter Logic")
-    st.markdown(f"- **Power Samples Scatter:** X = `{wind_col}`, Y = `{power_col}`")
-    st.markdown(f"- **Nacelle Samples Scatter:** X = `{wind_col}`, Y = `{nacelle_col}`")
-
-    st.markdown("### Filtering Logic")
-    st.code(
-        "\n".join(
-            [
-                f"{wind_col} is not null",
-                f"{power_col} is not null",
-                f"{wind_min} <= {wind_col} <= {wind_max}",
-                f"{power_col} >= 0",
-                f"{pitch_col} is null OR ({pitch_min} <= {pitch_col} <= {pitch_max})",
-                f"{nacelle_col} is null OR ({nacelle_min} <= {nacelle_col} <= {nacelle_max})",
-            ]
-        ),
-        language="python",
-    )
-
-    st.markdown("### Power Curve Formula")
-    st.code(
-        "\n".join(
-            [
-                f"WindBin = floor({wind_col} / {BIN_SIZE}) * {BIN_SIZE}",
-                f"AvgPower = mean({power_col}) for each WindBin",
-                "Deviation_% = ((AvgPower - RefPower) / RefPower) * 100",
-            ]
-        ),
-        language="python",
-    )
-
-    st.markdown("### Nacelle Formula")
-    st.code(f"AvgNacelle = mean({nacelle_col})", language="python")
-
-# =========================
-# PROCESS
-# =========================
-def process_turbine(t):
-    df_t_all = df[df["Name"] == t].copy()
-    raw_rows = len(df_t_all)
-
-    result = {
-        "turbine": t,
-        "raw_rows": raw_rows,
-        "status": "No Data",
-        "comment": "No data available",
-        "df_t": pd.DataFrame(columns=[wind_col, power_col, nacelle_col]),
-        "merged": ref_curve.copy(),
-        "avg_dev": None,
-        "avg_nacelle": None,
-        "nacelle_curve": pd.DataFrame(),
-        "power_sample_count": 0,
-        "nacelle_sample_count": 0,
-    }
-
-    result["merged"]["AvgPower"] = np.nan
-    result["merged"]["Deviation_%"] = np.nan
-
-    if raw_rows == 0:
-        return result
-
-    df_t = df_t_all.dropna(subset=[wind_col, power_col]).copy()
-
-    if df_t.empty:
-        result["status"] = "No Valid Data"
-        result["comment"] = "Missing wind or power values"
-        return result
-
-    df_t = df_t[
-        (df_t[wind_col] >= wind_min)
-        & (df_t[wind_col] <= wind_max)
-        & (df_t[power_col] >= 0)
-    ].copy()
-
-    if pitch_col in df_t.columns:
-        df_t = df_t[
-            df_t[pitch_col].isna()
-            | ((df_t[pitch_col] >= pitch_min) & (df_t[pitch_col] <= pitch_max))
-        ].copy()
-
-    if nacelle_col in df_t.columns:
-        df_t = df_t[
-            df_t[nacelle_col].isna()
-            | ((df_t[nacelle_col] >= nacelle_min) & (df_t[nacelle_col] <= nacelle_max))
-        ].copy()
-
-    if df_t.empty:
-        result["status"] = "Filtered Out"
-        result["comment"] = "All rows removed by filters"
-        return result
-
-    power_samples_df = df_t.dropna(subset=[wind_col, power_col]).copy()
-    nacelle_samples_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
-
-    result["power_sample_count"] = len(power_samples_df)
-    result["nacelle_sample_count"] = len(nacelle_samples_df)
-
-    if nacelle_samples_df.empty:
-        nacelle_comment = "Nacelle average not available"
-    else:
-        result["avg_nacelle"] = nacelle_samples_df[nacelle_col].mean()
-        result["nacelle_curve"] = build_metric_curve(
-            nacelle_samples_df,
-            wind_col,
-            nacelle_col,
-            smooth=True,
-            smooth_window=9,
-            smooth_poly=3,
+def ensure_required_columns(df: pd.DataFrame, required: list[str], label: str) -> None:
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
+
+
+@st.cache_data(show_spinner=False)
+def load_scada_from_upload(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    if not file_name.lower().endswith(".csv"):
+        raise ValueError("SCADA input must be a CSV file.")
+
+    scada = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
+    ensure_required_columns(scada, REQUIRED_SCADA_COLUMNS, "SCADA file")
+
+    for col in [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]:
+        scada[col] = pd.to_numeric(scada[col], errors="coerce")
+
+    scada[TIME_COL] = pd.to_datetime(scada[TIME_COL], errors="coerce", dayfirst=True)
+    scada[WTG_COL] = scada[WTG_COL].astype(str).str.strip()
+    return scada
+
+
+@st.cache_data(show_spinner=False)
+def load_reference_curves_from_upload(file_bytes: bytes, file_name: str) -> dict[str, pd.DataFrame]:
+    if not file_name.lower().endswith(".xlsx"):
+        raise ValueError("Reference input must be an XLSX file.")
+
+    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Power Curve", header=None)
+    if raw.shape[0] < 4:
+        raise ValueError("Reference workbook Power Curve sheet does not contain enough rows.")
+
+    site_row = raw.iloc[2]
+    wind_speed = pd.to_numeric(raw.iloc[3:, 0], errors="coerce")
+    curves: dict[str, pd.DataFrame] = {}
+
+    for idx in range(1, raw.shape[1]):
+        curve_name = site_row.iloc[idx]
+        if pd.isna(curve_name):
+            continue
+
+        curve_name = str(curve_name).replace("\n", " ").strip()
+        if not curve_name:
+            continue
+
+        power = pd.to_numeric(raw.iloc[3:, idx], errors="coerce")
+        curve_df = pd.DataFrame(
+            {
+                "ReferenceWindSpeed_mps": wind_speed,
+                "ReferencePower_kW": power,
+            }
+        ).dropna()
+
+        curve_df = (
+            curve_df.sort_values("ReferenceWindSpeed_mps")
+            .drop_duplicates("ReferenceWindSpeed_mps")
+            .reset_index(drop=True)
         )
-        nacelle_comment = generate_nacelle_comment(result["avg_nacelle"])
 
-    df_t["WindBin"] = (np.floor(df_t[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
+        if not curve_df.empty:
+            curves[curve_name] = curve_df
 
-    actual = df_t.groupby("WindBin", as_index=False).agg(AvgPower=(power_col, "mean"))
+    if not curves:
+        raise ValueError("No usable reference curves were found in the workbook.")
 
-    merged = ref_curve.merge(actual, on="WindBin", how="left")
-    merged["AvgPower"] = safe_savgol(merged["AvgPower"], window=7, poly=2)
-    merged["Deviation_%"] = np.where(
-        merged["RefPower"] > 0,
-        ((merged["AvgPower"] - merged["RefPower"]) / merged["RefPower"]) * 100,
+    return curves
+
+
+def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFrame | int]:
+    working = scada.copy()
+
+    mask_status = working[STATUS_COL].eq(100)
+    mask_wind_std = working[WIND_STD_COL].lt(1)
+    mask_pitch_std = working[PITCH_STD_COL].between(-5, 19, inclusive="both")
+    mask = mask_status & mask_wind_std & mask_pitch_std
+    filtered = working.loc[mask].copy()
+
+    filter_counts = pd.DataFrame(
+        [
+            ["Total SCADA records", len(working)],
+            ["PCurveStsAve = 100", int(mask_status.sum())],
+            [
+                "After PCurveStsAve = 100 and WindSpeedStd < 1",
+                int((mask_status & mask_wind_std).sum()),
+            ],
+            ["After all three required filters", int(mask.sum())],
+        ],
+        columns=["Filter Stage", "Record Count"],
+    )
+
+    filtered = filtered.rename(
+        columns={
+            WTG_COL: "WTG",
+            TIME_COL: "DateTime",
+            WIND_SPEED_COL: "WindSpeed_mps",
+            POWER_COL: "ActualPower_kW",
+        }
+    )
+
+    ref_working = ref.copy()
+    for col in ["ReferenceWindSpeed_mps", "ReferencePower_kW"]:
+        ref_working[col] = pd.to_numeric(ref_working[col], errors="coerce")
+
+    ref_working = (
+        ref_working.dropna()
+        .sort_values("ReferenceWindSpeed_mps")
+        .drop_duplicates("ReferenceWindSpeed_mps")
+        .reset_index(drop=True)
+    )
+
+    if ref_working.empty:
+        raise ValueError("Selected reference curve has no valid numeric data.")
+
+    ref_min = ref_working["ReferenceWindSpeed_mps"].min()
+    ref_max = ref_working["ReferenceWindSpeed_mps"].max()
+
+    filtered = filtered[filtered["WindSpeed_mps"].between(ref_min, ref_max)].copy()
+    if filtered.empty:
+        raise ValueError("No SCADA records remain after applying filters and reference wind-speed range.")
+
+    filtered["ReferencePower_kW"] = np.interp(
+        filtered["WindSpeed_mps"],
+        ref_working["ReferenceWindSpeed_mps"],
+        ref_working["ReferencePower_kW"],
+    )
+    filtered["Deviation_kW"] = filtered["ActualPower_kW"] - filtered["ReferencePower_kW"]
+    filtered["Shortfall_kW"] = -filtered["Deviation_kW"]
+    filtered["Deviation_pct"] = np.where(
+        filtered["ReferencePower_kW"] > 0,
+        100 * filtered["Deviation_kW"] / filtered["ReferencePower_kW"],
         np.nan,
     )
+    filtered["WindSpeedBin_mps"] = np.floor(filtered["WindSpeed_mps"] / BIN_WIDTH) * BIN_WIDTH
 
-    avg_dev = merged["Deviation_%"].mean(skipna=True)
-    if pd.isna(avg_dev):
-        avg_dev = None
+    wtg_bins = (
+        filtered.groupby(["WTG", "WindSpeedBin_mps"])
+        .agg(
+            Samples=("ActualPower_kW", "size"),
+            MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+            MeanActualPower_kW=("ActualPower_kW", "mean"),
+            MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+            MeanDeviation_kW=("Deviation_kW", "mean"),
+            MeanShortfall_kW=("Shortfall_kW", "mean"),
+            MeanDeviation_pct=("Deviation_pct", "mean"),
+            PowerStdDev_kW=("ActualPower_kW", "std"),
+        )
+        .reset_index()
+    )
 
-    result["df_t"] = df_t
-    result["merged"] = merged
-    result["avg_dev"] = avg_dev
+    fleet_bins = (
+        filtered.groupby("WindSpeedBin_mps")
+        .agg(
+            Samples=("ActualPower_kW", "size"),
+            MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+            MeanActualPower_kW=("ActualPower_kW", "mean"),
+            MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+            MeanDeviation_kW=("Deviation_kW", "mean"),
+            MeanDeviation_pct=("Deviation_pct", "mean"),
+        )
+        .reset_index()
+    )
 
-    if avg_dev is None:
-        result["status"] = "Low Data"
-        result["comment"] = f"Insufficient overlap with reference | {nacelle_comment}"
-    else:
-        result["status"] = "OK"
-        result["comment"] = f"{generate_comment(avg_dev)} | {nacelle_comment}"
+    wtg_summary = (
+        filtered.groupby("WTG")
+        .agg(
+            ValidSamples=("ActualPower_kW", "size"),
+            MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+            MeanActualPower_kW=("ActualPower_kW", "mean"),
+            MeanReferencePower_kW=("ReferencePower_kW", "mean"),
+            MeanDeviation_kW=("Deviation_kW", "mean"),
+            MeanSampleDeviation_pct=("Deviation_pct", "mean"),
+            FirstTimestamp=("DateTime", "min"),
+            LastTimestamp=("DateTime", "max"),
+        )
+        .reset_index()
+    )
 
-    return result
+    wtg_summary["AggregateDeviation_pct"] = np.where(
+        wtg_summary["MeanReferencePower_kW"] > 0,
+        100
+        * (wtg_summary["MeanActualPower_kW"] - wtg_summary["MeanReferencePower_kW"])
+        / wtg_summary["MeanReferencePower_kW"],
+        np.nan,
+    )
+    wtg_summary = wtg_summary.sort_values("AggregateDeviation_pct")
 
-# =========================
-# PLOT
-# =========================
-def plot_power_curve(df_t, merged, title, dev, comment, power_sample_count):
-    safe_dev = 0 if dev is None or pd.isna(dev) else dev
-    title_color = "green" if -2 <= safe_dev <= 2 else ("orange" if safe_dev < -2 else "red")
-    dev_txt = "NA" if dev is None or pd.isna(dev) else round(dev, 2)
+    overall = pd.DataFrame(
+        [
+            ["Total SCADA records", len(working)],
+            ["Records passing all required filters", int(mask.sum())],
+            ["Records compared to reference curve", len(filtered)],
+            ["WTGs compared", filtered["WTG"].nunique()],
+            ["Reference curve min wind speed (m/s)", ref_min],
+            ["Reference curve max wind speed (m/s)", ref_max],
+            ["Filter 1", "PCurveStsAve = 100"],
+            ["Filter 2", "WindSpeedStd < 1"],
+            ["Filter 3", "-5 <= BladePitchStd <= 19"],
+            [
+                "Deviation sign",
+                "Actual power - reference power; negative means below reference",
+            ],
+        ],
+        columns=["Metric", "Value"],
+    )
 
+    return {
+        "filtered": filtered,
+        "filter_counts": filter_counts,
+        "wtg_bins": wtg_bins,
+        "fleet_bins": fleet_bins,
+        "wtg_summary": wtg_summary,
+        "overall": overall,
+        "ref": ref_working,
+        "rows_passing": int(mask.sum()),
+        "rows_compared": len(filtered),
+        "wtg_count": int(filtered["WTG"].nunique()),
+    }
+
+
+def make_fleet_power_curve_plotly(ref: pd.DataFrame, filtered: pd.DataFrame, fleet_bins: pd.DataFrame):
     fig = go.Figure()
-    power_samples_df = df_t.dropna(subset=[wind_col, power_col]).copy()
 
-    if not power_samples_df.empty:
+    fig.add_trace(
+        go.Scattergl(
+            x=filtered["WindSpeed_mps"],
+            y=filtered["ActualPower_kW"],
+            mode="markers",
+            name="Filtered 10-min SCADA",
+            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
+            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Actual Power: %{y:.2f} kW<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=ref["ReferenceWindSpeed_mps"],
+            y=ref["ReferencePower_kW"],
+            mode="lines",
+            name="Reference Power Curve",
+            line=dict(width=3, color="#d62728"),
+            hovertemplate="Reference Wind: %{x:.2f} m/s<br>Reference Power: %{y:.2f} kW<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=fleet_bins["MeanWindSpeed_mps"],
+            y=fleet_bins["MeanActualPower_kW"],
+            mode="lines+markers",
+            name="SCADA mean by 0.5 m/s bin",
+            line=dict(width=3, color="#2ca02c"),
+            marker=dict(size=7),
+            hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Actual Power: %{y:.2f} kW<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        title="Fleet Power Curve Comparison",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Active Power (kW)",
+        height=650,
+        hovermode="closest",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        legend=dict(orientation="h", y=1.02, x=0),
+        margin=dict(l=40, r=40, t=80, b=40),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+
+    return fig
+
+
+def make_fleet_deviation_plotly(fleet_bins: pd.DataFrame):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=fleet_bins["MeanWindSpeed_mps"],
+            y=fleet_bins["MeanDeviation_kW"],
+            mode="lines+markers",
+            name="Mean Deviation",
+            line=dict(width=3, color="#ff7f0e"),
+            marker=dict(size=7),
+            hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Deviation: %{y:.2f} kW<extra></extra>",
+        )
+    )
+
+    fig.add_hline(y=0, line_width=1, line_color="black")
+
+    fig.update_layout(
+        title="Fleet Deviation by Wind-Speed Bin",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Mean Deviation (Actual - Reference, kW)",
+        height=500,
+        hovermode="closest",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=40, r=40, t=80, b=40),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+
+    return fig
+
+
+def make_wtg_power_curve_plotly(ref: pd.DataFrame, filtered_wtg: pd.DataFrame, wtg_bins: pd.DataFrame, wtg_name: str):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scattergl(
+            x=filtered_wtg["WindSpeed_mps"],
+            y=filtered_wtg["ActualPower_kW"],
+            mode="markers",
+            name=f"{wtg_name} SCADA",
+            marker=dict(size=6, opacity=0.20, color="#1f77b4"),
+            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Actual Power: %{y:.2f} kW<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=ref["ReferenceWindSpeed_mps"],
+            y=ref["ReferencePower_kW"],
+            mode="lines",
+            name="Reference Curve",
+            line=dict(width=3, color="#d62728"),
+        )
+    )
+
+    if not wtg_bins.empty:
         fig.add_trace(
-            go.Scattergl(
-                x=power_samples_df[wind_col],
-                y=power_samples_df[power_col],
-                mode="markers",
-                marker=dict(size=7, color="blue", opacity=0.55, line=dict(width=0.5, color="white")),
-                name=f"Power Samples ({power_sample_count})",
-                hovertemplate=(
-                    f"{wind_col}: " + "%{x:.2f} m/s<br>"
-                    f"{power_col}: " + "%{y:.2f}<extra>Power Sample</extra>"
-                ),
+            go.Scatter(
+                x=wtg_bins["MeanWindSpeed_mps"],
+                y=wtg_bins["MeanActualPower_kW"],
+                mode="lines+markers",
+                name=f"{wtg_name} mean by bin",
+                line=dict(width=3, color="#2ca02c"),
+                marker=dict(size=7),
+            )
+        )
+
+    fig.update_layout(
+        title=f"{wtg_name} Power Curve Comparison",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Active Power (kW)",
+        height=560,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="closest",
+        margin=dict(l=40, r=40, t=80, b=40),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+    return fig
+
+
+def make_multi_wtg_comparison_plot(results: dict, selected_wtgs: list[str]):
+    fig = go.Figure()
+
+    subset = results["wtg_bins"][results["wtg_bins"]["WTG"].isin(selected_wtgs)].copy()
+    for wtg in selected_wtgs:
+        s = subset[subset["WTG"] == wtg].copy()
+        if s.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=s["MeanWindSpeed_mps"],
+                y=s["MeanActualPower_kW"],
+                mode="lines+markers",
+                name=wtg,
             )
         )
 
     fig.add_trace(
         go.Scatter(
-            x=merged["WindBin"],
-            y=merged["RefPower"],
+            x=results["ref"]["ReferenceWindSpeed_mps"],
+            y=results["ref"]["ReferencePower_kW"],
             mode="lines",
-            line=dict(color="#d62728", width=3, dash="dash"),
-            name="Reference Power Curve",
-            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Reference Power: %{y:.2f}<extra></extra>",
+            name="Reference Curve",
+            line=dict(width=4, color="black", dash="dash"),
         )
     )
 
-    if merged["AvgPower"].notna().any():
-        fig.add_trace(
-            go.Scatter(
-                x=merged["WindBin"],
-                y=merged["AvgPower"],
-                mode="lines+markers",
-                line=dict(color="#00a6ff", width=3),
-                marker=dict(size=5, color="#00a6ff"),
-                name="Actual Average Power",
-                hovertemplate="Wind Speed: %{x:.2f} m/s<br>Average Power: %{y:.2f}<extra></extra>",
-            )
-        )
-
-    y_max = 3500
-    if merged["RefPower"].notna().any():
-        y_max = max(y_max, float(np.nanmax(merged["RefPower"])) + 150)
-    if merged["AvgPower"].notna().any():
-        y_max = max(y_max, float(np.nanmax(merged["AvgPower"])) + 150)
-    if not power_samples_df.empty and power_samples_df[power_col].notna().any():
-        y_max = max(y_max, float(np.nanmax(power_samples_df[power_col])) + 150)
-
     fig.update_layout(
-        title=dict(
-            text=f"{title} | Dev: {dev_txt}% | Power Samples: {power_sample_count} | {comment}",
-            font=dict(color=title_color, size=18),
-        ),
-        xaxis=dict(
-            title="Wind Speed (m/s)",
-            range=[0, 15],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Active Power",
-            range=[0, y_max],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            gridwidth=1,
-            zeroline=False,
-        ),
-        height=650,
+        title="Multi-WTG Comparison vs Reference Curve",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Mean Actual Power (kW)",
+        height=600,
         plot_bgcolor="white",
         paper_bgcolor="white",
         hovermode="closest",
-        legend=dict(orientation="v", x=1.01, y=1.0, bgcolor="rgba(255,255,255,0.85)"),
-        margin=dict(l=60, r=230, t=90, b=60),
+        margin=dict(l=40, r=40, t=80, b=40),
     )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
 
-def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle, nacelle_sample_count):
-    nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
 
-    fig = go.Figure()
-    nacelle_samples_df = df_t.dropna(subset=[wind_col, nacelle_col]).copy()
 
-    if not nacelle_samples_df.empty:
-        fig.add_trace(
-            go.Scattergl(
-                x=nacelle_samples_df[wind_col],
-                y=nacelle_samples_df[nacelle_col],
-                mode="markers",
-                marker=dict(
-                    size=5,
-                    opacity=0.35,
-                    color="rgba(0,128,128,0.65)",
-                    line=dict(width=0.3, color="white"),
-                ),
-                name=f"Nacelle Samples ({nacelle_sample_count})",
-                hovertemplate=(
-                    f"{wind_col}: " + "%{x:.2f} m/s<br>"
-                    f"{nacelle_col}: " + "%{y:.2f}°<extra>Nacelle Sample</extra>"
-                ),
-            )
-        )
+def build_pdf_report(site_name: str, date_text: str, figures: list[tuple[str, go.Figure]], summary_df: pd.DataFrame):
+    if not (KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE):
+        raise RuntimeError("PDF export needs both kaleido and reportlab installed.")
 
-    if (not nacelle_curve.empty) and nacelle_curve["AvgMetric"].notna().any():
-        fig.add_trace(
-            go.Scatter(
-                x=nacelle_curve["WindBin"],
-                y=nacelle_curve["AvgMetric"],
-                mode="lines+markers",
-                line=dict(width=4, color="#008080", shape="spline", smoothing=1.2),
-                marker=dict(size=7, color="#008080"),
-                name="Smoothed Avg Nacelle Curve",
-                hovertemplate=(
-                    "Wind Speed Bin: %{x:.2f} m/s<br>"
-                    "Avg Nacelle: %{y:.2f}°<extra>Smoothed Curve</extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=f"{title} - Nacelle Graph | Avg Nacelle: {nac_txt}° | Nacelle Samples: {nacelle_sample_count}",
-        xaxis=dict(
-            title="Wind Speed (m/s)",
-            range=[0, 15],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Nacelle Position (°)",
-            range=[0, 360],
-            showgrid=True,
-            gridcolor="#d9d9d9",
-            zeroline=False,
-        ),
-        height=480,
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        hovermode="closest",
-        legend=dict(orientation="v", x=1.01, y=1.0, bgcolor="rgba(255,255,255,0.85)"),
-        margin=dict(l=60, r=180, t=70, b=60),
-    )
-    return fig
-
-# =========================
-# DISPLAY
-# =========================
-results = []
-figures = []
-
-for t in turbines_to_show:
-    res = process_turbine(t)
-
-    st.markdown(f"## Turbine: {t}")
-    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Graph"])
-
-    with tab1:
-        fig_power = plot_power_curve(
-            res["df_t"],
-            res["merged"],
-            res["turbine"],
-            res["avg_dev"],
-            res["comment"],
-            res["power_sample_count"],
-        )
-        st.plotly_chart(fig_power, use_container_width=True)
-        st.caption(f"Power Sample Formula: X = {wind_col}, Y = {power_col}")
-        st.caption(f"Power Samples Count: {res['power_sample_count']}")
-
-    with tab2:
-        fig_nacelle = plot_nacelle_graph(
-            res["df_t"],
-            res["nacelle_curve"],
-            res["turbine"],
-            res["avg_nacelle"],
-            res["nacelle_sample_count"],
-        )
-        st.plotly_chart(fig_nacelle, use_container_width=True)
-        st.caption(f"Nacelle Sample Formula: X = {wind_col}, Y = {nacelle_col}")
-        st.caption(f"Nacelle Samples Count: {res['nacelle_sample_count']}")
-
-    st.markdown("### Analysis")
-    st.code(res["comment"])
-    st.divider()
-
-    figures.append((t, fig_power, res["comment"]))
-
-    results.append(
-        {
-            "Turbine": t,
-            "Deviation_%": None if res["avg_dev"] is None else round(res["avg_dev"], 2),
-            "Avg_Nacelle": None if res["avg_nacelle"] is None else round(res["avg_nacelle"], 2),
-            "Nacelle_Band": get_nacelle_band(res["avg_nacelle"]),
-            "Power_Samples": res["power_sample_count"],
-            "Nacelle_Samples": res["nacelle_sample_count"],
-            "Status": res["status"],
-            "Rows": res["raw_rows"],
-            "Comment": res["comment"],
-        }
-    )
-
-# =========================
-# RANKING
-# =========================
-st.subheader("Turbine Ranking")
-results_df = pd.DataFrame(results)
-
-if not results_df.empty:
-    results_df = results_df.sort_values(by="Deviation_%", na_position="last")
-    st.dataframe(results_df, use_container_width=True)
-
-# =========================
-# PDF DOWNLOAD
-# =========================
-try:
     pdf_buffer = io.BytesIO()
     pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
     width, height = landscape(A4)
 
-    if os.path.exists(logo_path):
-        pdf.drawImage(logo_path, 30, height - 80, width=120, height=40)
+    if LOGO_PATH.exists():
+        pdf.drawImage(str(LOGO_PATH), 30, height - 80, width=120, height=40, preserveAspectRatio=True, mask="auto")
 
     pdf.setFont("Helvetica-Bold", 16)
     pdf.drawString(170, height - 40, "Power Curve Analytics Report")
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(170, height - 60, f"Site: {site}")
-    pdf.drawString(170, height - 75, f"Date Range: {start_day} to {end_day}")
+    pdf.drawString(170, height - 60, f"Reference Curve: {site_name}")
+    pdf.drawString(170, height - 75, f"Date Range: {date_text}")
 
     y = height - 120
 
-    for turbine, fig, comment in figures:
-        if KALEIDO_AVAILABLE:
-            try:
-                img = fig.to_image(format="png")
-                img_reader = ImageReader(io.BytesIO(img))
+    for title, fig in figures:
+        try:
+            img = fig.to_image(format="png", width=1200, height=700, scale=2)
+            img_reader = ImageReader(io.BytesIO(img))
 
-                if y < 260:
-                    pdf.showPage()
-                    y = height - 60
+            if y < 260:
+                pdf.showPage()
+                y = height - 60
 
-                pdf.drawImage(img_reader, 30, y - 220, width=360, height=200)
-                pdf.setFont("Helvetica-Bold", 11)
-                pdf.drawString(420, y - 40, turbine)
-                pdf.setFont("Helvetica", 10)
-                pdf.drawString(420, y - 60, comment[:110])
-                y -= 240
-            except Exception:
-                pass
+            pdf.setFont("Helvetica-Bold", 11)
+            pdf.drawString(30, y, title)
+            pdf.drawImage(img_reader, 30, y - 220, width=500, height=200)
+            y -= 250
+        except Exception:
+            continue
 
     pdf.showPage()
     pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawString(30, height - 40, "Turbine Ranking Summary")
+    pdf.drawString(30, height - 40, "WTG Ranking Summary")
     y = height - 80
     pdf.setFont("Helvetica", 10)
 
-    if not results_df.empty:
-        for _, row in results_df.iterrows():
-            dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
-            nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
-            line = (
-                f"{row['Turbine']} | Dev: {dev_text}% | "
-                f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
-                f"Power Samples: {row['Power_Samples']} | "
-                f"Nacelle Samples: {row['Nacelle_Samples']} | "
-                f"{row['Status']}"
-            )
-            pdf.drawString(40, y, line[:170])
-            y -= 20
-            if y < 40:
-                pdf.showPage()
-                y = height - 40
+    for _, row in summary_df.iterrows():
+        line = (
+            f"{row['WTG']} | AggregateDeviation_pct: "
+            f"{'NA' if pd.isna(row['AggregateDeviation_pct']) else round(row['AggregateDeviation_pct'], 2)} | "
+            f"ValidSamples: {row['ValidSamples']}"
+        )
+        pdf.drawString(40, y, line[:170])
+        y -= 20
+        if y < 40:
+            pdf.showPage()
+            pdf.setFont("Helvetica", 10)
+            y = height - 40
 
     pdf.save()
     pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
 
-    st.download_button(
-        label="Download Full Dashboard Report (PDF)",
-        data=pdf_buffer.getvalue(),
-        file_name="WindFarm_Full_Report.pdf",
-        mime="application/pdf",
+
+# =========================
+# HEADER
+# =========================
+top_left, top_mid, top_right = st.columns([1, 2, 1])
+with top_mid:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=260)
+
+st.title("Power Curve Analytics Dashboard")
+st.caption("Correct engineering logic with polished UI, interactive charts, optional login, logo, and PDF export")
+
+# =========================
+# SIDEBAR INPUTS
+# =========================
+st.sidebar.header("Inputs")
+
+uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
+uploaded_ref = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"])
+
+use_default_files = st.sidebar.checkbox("Use default local files if uploads are not provided", value=True)
+
+scada_bytes = None
+scada_name = None
+ref_bytes = None
+ref_name = None
+
+if uploaded_scada is not None:
+    scada_bytes = uploaded_scada.getvalue()
+    scada_name = uploaded_scada.name
+elif use_default_files and DEFAULT_CSV_PATH.exists():
+    scada_bytes = DEFAULT_CSV_PATH.read_bytes()
+    scada_name = DEFAULT_CSV_PATH.name
+
+if uploaded_ref is not None:
+    ref_bytes = uploaded_ref.getvalue()
+    ref_name = uploaded_ref.name
+elif use_default_files and DEFAULT_XLSX_PATH.exists():
+    ref_bytes = DEFAULT_XLSX_PATH.read_bytes()
+    ref_name = DEFAULT_XLSX_PATH.name
+
+if scada_bytes is None:
+    st.warning("Please upload the SCADA CSV file.")
+    st.stop()
+
+if ref_bytes is None:
+    st.warning("Please upload the reference Excel file.")
+    st.stop()
+
+# =========================
+# LOAD DATA
+# =========================
+try:
+    scada = load_scada_from_upload(scada_bytes, scada_name)
+    reference_curves = load_reference_curves_from_upload(ref_bytes, ref_name)
+except Exception as exc:
+    st.error(f"Failed to load input files: {exc}")
+    st.stop()
+
+# =========================
+# CONTROLS
+# =========================
+st.sidebar.header("Analysis Controls")
+
+curve_names = sorted(reference_curves.keys())
+selected_curve = st.sidebar.selectbox("Select reference curve", curve_names)
+
+valid_time = scada[TIME_COL].dropna()
+if not valid_time.empty:
+    min_date = valid_time.min().date()
+    max_date = valid_time.max().date()
+    date_range = st.sidebar.date_input(
+        "Date range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
+    )
+else:
+    date_range = None
+
+scada_filtered = scada.copy()
+date_text = "All available dates"
+
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = date_range
+    scada_filtered = scada_filtered[
+        scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
+    ].copy()
+    date_text = f"{start_date} to {end_date}"
+
+all_wtgs = sorted(scada_filtered[WTG_COL].dropna().astype(str).unique().tolist())
+selected_wtgs_filter = st.sidebar.multiselect(
+    "Optional WTG filter",
+    options=all_wtgs,
+    default=[],
+    help="Leave empty to analyse all available WTG rows in the selected date range.",
+)
+
+if selected_wtgs_filter:
+    scada_filtered = scada_filtered[scada_filtered[WTG_COL].isin(selected_wtgs_filter)].copy()
+
+if scada_filtered.empty:
+    st.warning("No SCADA data is available after applying the selected date/WTG filters.")
+    st.stop()
+
+# =========================
+# RUN ANALYSIS
+# =========================
+ref_df = reference_curves[selected_curve]
+
+try:
+    results = run_analysis(scada_filtered, ref_df)
+except Exception as exc:
+    st.error(f"Analysis could not be completed: {exc}")
+    st.stop()
+
+# =========================
+# METRICS
+# =========================
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Rows passing filters", f"{results['rows_passing']:,}")
+m2.metric("Rows compared to curve", f"{results['rows_compared']:,}")
+m3.metric("WTGs analysed", f"{results['wtg_count']:,}")
+m4.metric("Reference curve", selected_curve)
+
+# =========================
+# SUMMARY TABLES
+# =========================
+left_col, right_col = st.columns([1, 1])
+
+with left_col:
+    st.subheader("Filter counts")
+    st.dataframe(results["filter_counts"], width="stretch", hide_index=True)
+
+with right_col:
+    st.subheader("Overall summary")
+    overall_display = results["overall"].astype({"Value": "string"})
+    st.dataframe(overall_display, width="stretch", hide_index=True)
+
+# =========================
+# FLEET CHARTS
+# =========================
+st.subheader("Fleet charts")
+
+fleet_power_fig = make_fleet_power_curve_plotly(
+    results["ref"], results["filtered"], results["fleet_bins"]
+)
+st.plotly_chart(fleet_power_fig, width="stretch")
+
+fleet_dev_fig = make_fleet_deviation_plotly(results["fleet_bins"])
+st.plotly_chart(fleet_dev_fig, width="stretch")
+
+# =========================
+# PER-WTG VIEW
+# =========================
+st.subheader("Per-WTG analysis")
+
+available_result_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+selected_wtg_view = st.selectbox(
+    "Select WTG for detailed view",
+    available_result_wtgs if available_result_wtgs else ["No WTG available"],
+)
+
+if available_result_wtgs:
+    filtered_wtg = results["filtered"][results["filtered"]["WTG"] == selected_wtg_view].copy()
+    wtg_bins_view = results["wtg_bins"][results["wtg_bins"]["WTG"] == selected_wtg_view].copy()
+    wtg_summary_view = results["wtg_summary"][results["wtg_summary"]["WTG"] == selected_wtg_view].copy()
+
+    wtg_fig = make_wtg_power_curve_plotly(
+        results["ref"], filtered_wtg, wtg_bins_view, selected_wtg_view
+    )
+    st.plotly_chart(wtg_fig, width="stretch")
+
+    if not wtg_summary_view.empty:
+        st.markdown("#### Selected WTG summary")
+        st.dataframe(wtg_summary_view, width="stretch", hide_index=True)
+
+# =========================
+# MULTI-WTG COMPARISON
+# =========================
+st.subheader("Multi-WTG comparison")
+
+multi_default = available_result_wtgs[: min(5, len(available_result_wtgs))]
+selected_compare_wtgs = st.multiselect(
+    "Select WTGs to compare on one chart",
+    options=available_result_wtgs,
+    default=multi_default,
+)
+
+if selected_compare_wtgs:
+    multi_fig = make_multi_wtg_comparison_plot(results, selected_compare_wtgs)
+    st.plotly_chart(multi_fig, width="stretch")
+
+# =========================
+# RANKING
+# =========================
+st.subheader("Turbine ranking")
+
+ranking_df = results["wtg_summary"][
+    ["WTG", "ValidSamples", "MeanActualPower_kW", "MeanReferencePower_kW", "AggregateDeviation_pct"]
+].copy()
+ranking_df = ranking_df.sort_values("AggregateDeviation_pct", na_position="last")
+st.dataframe(ranking_df, width="stretch", hide_index=True)
+
+# =========================
+# DATA TABLES
+# =========================
+with st.expander("Show WTG summary"):
+    st.dataframe(results["wtg_summary"], width="stretch", hide_index=True)
+
+with st.expander("Show fleet wind bin summary"):
+    st.dataframe(results["fleet_bins"], width="stretch", hide_index=True)
+
+with st.expander("Show WTG wind bin summary"):
+    st.dataframe(results["wtg_bins"], width="stretch", hide_index=True)
+
+with st.expander("Show filtered SCADA sample"):
+    preview_cols = [
+        "WTG",
+        "DateTime",
+        STATUS_COL,
+        WIND_STD_COL,
+        PITCH_STD_COL,
+        "WindSpeed_mps",
+        "ActualPower_kW",
+        "ReferencePower_kW",
+        "Deviation_kW",
+        "Shortfall_kW",
+        "Deviation_pct",
+        "WindSpeedBin_mps",
+    ]
+    st.dataframe(
+        results["filtered"][preview_cols].head(300),
+        width="stretch",
+        hide_index=True,
     )
 
-except Exception as e:
-    st.error("PDF generation failed")
-    st.code(str(e))
+# =========================
+# DOWNLOADS
+# =========================
+st.subheader("Downloads")
+
+d1, d2, d3 = st.columns(3)
+
+with d1:
+    st.download_button(
+        "Download filtered SCADA CSV",
+        data=to_csv_bytes(results["filtered"]),
+        file_name="filtered_scada_power_curve.csv",
+        mime="text/csv",
+    )
+
+with d2:
+    st.download_button(
+        "Download WTG summary CSV",
+        data=to_csv_bytes(results["wtg_summary"]),
+        file_name="wtg_summary_power_curve.csv",
+        mime="text/csv",
+    )
+
+with d3:
+    st.download_button(
+        "Download fleet bins CSV",
+        data=to_csv_bytes(results["fleet_bins"]),
+        file_name="fleet_bins_power_curve.csv",
+        mime="text/csv",
+    )
+
+# =========================
+# PDF EXPORT
+# =========================
+st.subheader("PDF report")
+
+if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
+    pdf_figures = [
+        ("Fleet Power Curve Comparison", fleet_power_fig),
+        ("Fleet Deviation by Wind-Speed Bin", fleet_dev_fig),
+    ]
+    if available_result_wtgs:
+        pdf_figures.append((f"{selected_wtg_view} Power Curve Comparison", wtg_fig))
+
+    try:
+        pdf_bytes = build_pdf_report(
+            selected_curve,
+            date_text,
+            pdf_figures,
+            ranking_df,
+        )
+        st.download_button(
+            label="Download PDF Report",
+            data=pdf_bytes,
+            file_name="power_curve_dashboard_report.pdf",
+            mime="application/pdf",
+        )
+    except Exception as exc:
+        st.warning(f"PDF generation is available but failed: {exc}")
+else:
+    st.info("PDF export is disabled. Install both kaleido and reportlab to enable PDF download.")
