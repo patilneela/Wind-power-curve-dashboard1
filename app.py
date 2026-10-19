@@ -124,43 +124,6 @@ def compute_preset_range(preset: str, today_ts: pd.Timestamp):
     return None
 
 
-def build_metric_curve(df_t, wind_col, metric_col):
-    tmp = df_t[[wind_col, metric_col]].dropna().copy()
-
-    if tmp.empty:
-        return pd.DataFrame(columns=["WindBin", "AvgMetric"])
-
-    tmp["WindBin"] = (np.floor(tmp[wind_col] / BIN_SIZE) * BIN_SIZE).round(6)
-    out = tmp.groupby("WindBin", as_index=False).agg(AvgMetric=(metric_col, "mean"))
-    return out
-
-
-def get_nacelle_band(avg_nacelle):
-    if avg_nacelle is None or pd.isna(avg_nacelle):
-        return "NA"
-    if 0 <= avg_nacelle < 60:
-        return "0-60"
-    elif 60 <= avg_nacelle < 120:
-        return "60-120"
-    elif 120 <= avg_nacelle < 180:
-        return "120-180"
-    elif 180 <= avg_nacelle < 240:
-        return "180-240"
-    elif 240 <= avg_nacelle <= 360:
-        return "240-360"
-    return "Out of Range"
-
-
-def generate_nacelle_comment(avg_nacelle):
-    if avg_nacelle is None or pd.isna(avg_nacelle):
-        return "Nacelle average not available"
-    band = get_nacelle_band(avg_nacelle)
-    val = round(avg_nacelle, 2)
-    if band == "Out of Range":
-        return f"NacelleAvg: {val}° → Out of configured range"
-    return f"NacelleAvg: {val}° → Band {band}"
-
-
 def generate_comment(dev):
     if dev is None or pd.isna(dev):
         return "Deviation not available"
@@ -181,45 +144,6 @@ def generate_comment(dev):
         return f"Dev: {dev}% → Slight overperformance"
     else:
         return f"Dev: {dev}% → Normal performance"
-
-
-def build_dashboard_filtered_df(
-    df_in,
-    wind_col,
-    power_col,
-    pitch_col,
-    nacelle_col,
-    wind_min,
-    wind_max,
-    pitch_min,
-    pitch_max,
-    nacelle_min,
-    nacelle_max,
-):
-    df_out = df_in.dropna(subset=[wind_col, power_col]).copy()
-
-    if df_out.empty:
-        return df_out
-
-    df_out = df_out[
-        (df_out[wind_col] >= wind_min)
-        & (df_out[wind_col] <= wind_max)
-        & (df_out[power_col] >= 0)
-    ].copy()
-
-    if pitch_col in df_out.columns:
-        df_out = df_out[
-            df_out[pitch_col].isna()
-            | ((df_out[pitch_col] >= pitch_min) & (df_out[pitch_col] <= pitch_max))
-        ].copy()
-
-    if nacelle_col in df_out.columns:
-        df_out = df_out[
-            df_out[nacelle_col].isna()
-            | ((df_out[nacelle_col] >= nacelle_min) & (df_out[nacelle_col] <= nacelle_max))
-        ].copy()
-
-    return df_out
 
 
 def build_site_reference_map(ref_raw):
@@ -250,6 +174,26 @@ def build_site_reference_map(ref_raw):
         site_map[site_name] = ref.reset_index(drop=True)
 
     return site_map
+
+
+def build_power_curve_base_df(
+    df_in,
+    wind_col,
+    power_col,
+    wind_min,
+    wind_max,
+):
+    df_out = df_in.dropna(subset=[wind_col, power_col]).copy()
+    if df_out.empty:
+        return df_out
+
+    df_out = df_out[
+        (df_out[wind_col] >= wind_min)
+        & (df_out[wind_col] <= wind_max)
+        & (df_out[power_col] >= 0)
+    ].copy()
+
+    return df_out
 
 
 def apply_power_curve_logic(
@@ -571,8 +515,6 @@ auto_power = detect_column(
         "OutputPowerAve",
     ],
 )
-auto_pitch = detect_column(available_columns, ["BladePitchAve", "PitchAve", "Pitch"])
-auto_nacelle = detect_column(available_columns, ["NacellePositionAve", "NacelleAve", "Nacelle Position"])
 
 status_filter_col = detect_column(available_columns, ["PCurveStsAve"])
 wind_std_filter_col = detect_column(available_columns, ["WindSpeedStd"])
@@ -595,22 +537,10 @@ power_col = st.sidebar.selectbox(
     available_columns,
     index=available_columns.index(auto_power) if auto_power in available_columns else 0,
 )
-pitch_col = st.sidebar.selectbox(
-    "Pitch Column",
-    available_columns,
-    index=available_columns.index(auto_pitch) if auto_pitch in available_columns else 0,
-)
-nacelle_col = st.sidebar.selectbox(
-    "Nacelle Column",
-    available_columns,
-    index=available_columns.index(auto_nacelle) if auto_nacelle in available_columns else 0,
-)
 
 df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
 df[wind_col] = pd.to_numeric(df[wind_col], errors="coerce")
 df[power_col] = pd.to_numeric(df[power_col], errors="coerce")
-df[pitch_col] = pd.to_numeric(df[pitch_col], errors="coerce")
-df[nacelle_col] = pd.to_numeric(df[nacelle_col], errors="coerce")
 
 for _filter_col in [status_filter_col, wind_std_filter_col, pitch_std_filter_col]:
     if _filter_col is not None:
@@ -715,10 +645,6 @@ st.markdown(f"Date Range: {start_day} → {end_day}")
 # FILTERS
 # =========================
 st.sidebar.markdown("### Filters")
-pitch_min = st.sidebar.number_input("Pitch Min", value=-5.0)
-pitch_max = st.sidebar.number_input("Pitch Max", value=5.0)
-nacelle_min = st.sidebar.number_input("Nacelle Min", value=0.0)
-nacelle_max = st.sidebar.number_input("Nacelle Max", value=360.0)
 wind_min = st.sidebar.number_input("Wind Min", value=3.0)
 wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 
@@ -728,7 +654,8 @@ wind_max = st.sidebar.number_input("Wind Max", value=15.0)
 with st.expander("Applied Formula and Filtering Logic", expanded=False):
     st.markdown("### Selected Site Logic")
     st.markdown(f"- The power-curve calculation uses the selected site's reference column: **{site}**.")
-    st.markdown("- This matches the standalone analysis logic, but dynamically for any site chosen in the Excel file.")
+    st.markdown("- Old power-curve logic and nacelle logic have been removed.")
+    st.markdown("- Only the new standalone-style power-curve logic is used.")
 
     st.markdown("### Required Power-Curve Filters")
     st.code(
@@ -742,7 +669,7 @@ with st.expander("Applied Formula and Filtering Logic", expanded=False):
         language="python",
     )
 
-    st.markdown("### Dashboard Filters")
+    st.markdown("### Base Filters")
     st.code(
         "\n".join(
             [
@@ -750,8 +677,6 @@ with st.expander("Applied Formula and Filtering Logic", expanded=False):
                 f"{power_col} is not null",
                 f"{wind_min} <= {wind_col} <= {wind_max}",
                 f"{power_col} >= 0",
-                f"{pitch_col} is null OR ({pitch_min} <= {pitch_col} <= {pitch_max})",
-                f"{nacelle_col} is null OR ({nacelle_min} <= {nacelle_col} <= {nacelle_max})",
             ]
         ),
         language="python",
@@ -785,63 +710,36 @@ def process_turbine(t):
         "raw_rows": raw_rows,
         "status": "No Data",
         "comment": "No data available",
-        "df_dashboard": pd.DataFrame(columns=[wind_col, power_col, nacelle_col]),
-        "df_nacelle": pd.DataFrame(columns=[wind_col, nacelle_col]),
+        "base_df": pd.DataFrame(columns=[wind_col, power_col]),
         "power_curve_df": pd.DataFrame(columns=[wind_col, power_col]),
         "merged": pd.DataFrame(columns=["WindBin", "RefPower", "AvgPower", "Deviation_%"]),
         "avg_dev": None,
-        "avg_nacelle": None,
-        "nacelle_curve": pd.DataFrame(),
-        "dashboard_power_sample_count": 0,
+        "base_power_sample_count": 0,
         "deviation_filter_rows": 0,
-        "nacelle_sample_count": 0,
         "missing_deviation_cols": [],
     }
 
     if raw_rows == 0:
         return result
 
-    df_dashboard = build_dashboard_filtered_df(
+    base_df = build_power_curve_base_df(
         df_t_all,
         wind_col,
         power_col,
-        pitch_col,
-        nacelle_col,
         wind_min,
         wind_max,
-        pitch_min,
-        pitch_max,
-        nacelle_min,
-        nacelle_max,
     )
 
-    if df_dashboard.empty:
+    if base_df.empty:
         result["status"] = "Filtered Out"
-        result["comment"] = "All rows removed by dashboard filters"
+        result["comment"] = "All rows removed by base power-curve filters"
         return result
 
-    result["df_dashboard"] = df_dashboard
-
-    dashboard_power_samples_df = df_dashboard.dropna(subset=[wind_col, power_col]).copy()
-    nacelle_samples_df = df_dashboard.dropna(subset=[wind_col, nacelle_col]).copy()
-
-    result["dashboard_power_sample_count"] = len(dashboard_power_samples_df)
-    result["nacelle_sample_count"] = len(nacelle_samples_df)
-    result["df_nacelle"] = nacelle_samples_df
-
-    if nacelle_samples_df.empty:
-        nacelle_comment = "Nacelle average not available"
-    else:
-        result["avg_nacelle"] = nacelle_samples_df[nacelle_col].mean()
-        result["nacelle_curve"] = build_metric_curve(
-            nacelle_samples_df,
-            wind_col,
-            nacelle_col,
-        )
-        nacelle_comment = generate_nacelle_comment(result["avg_nacelle"])
+    result["base_df"] = base_df
+    result["base_power_sample_count"] = len(base_df)
 
     pc_result = apply_power_curve_logic(
-        df_dashboard,
+        base_df,
         ref_curve_raw,
         wind_col,
         power_col,
@@ -862,26 +760,24 @@ def process_turbine(t):
             result["comment"] = (
                 "Deviation unavailable: missing required SCADA columns "
                 + ", ".join(result["missing_deviation_cols"])
-                + f" | {nacelle_comment}"
             )
         elif result["power_curve_df"].empty:
             result["comment"] = (
                 "No rows passed required power-curve filters "
                 "(PCurveStsAve=100, WindSpeedStd<1, -5<=BladePitchStd<=19)"
-                + f" | {nacelle_comment}"
             )
         else:
-            result["comment"] = f"Insufficient overlap with reference | {nacelle_comment}"
+            result["comment"] = "Insufficient overlap with reference"
     else:
         result["status"] = "OK"
-        result["comment"] = f"{generate_comment(result['avg_dev'])} | {nacelle_comment}"
+        result["comment"] = generate_comment(result["avg_dev"])
 
     return result
 
 # =========================
 # PLOT
 # =========================
-def plot_power_curve(power_curve_df, merged, title, dev, comment, deviation_sample_count):
+def plot_power_curve(power_curve_df, merged, title, deviation_sample_count):
     fig = go.Figure()
 
     if merged is not None and not merged.empty:
@@ -967,77 +863,6 @@ def plot_power_curve(power_curve_df, merged, title, dev, comment, deviation_samp
 
     return fig
 
-
-def plot_nacelle_graph(df_t, nacelle_curve, title, avg_nacelle, nacelle_sample_count):
-    nac_txt = "NA" if avg_nacelle is None or pd.isna(avg_nacelle) else round(avg_nacelle, 2)
-
-    fig = go.Figure()
-
-    if not df_t.empty:
-        fig.add_trace(
-            go.Scattergl(
-                x=df_t[wind_col],
-                y=df_t[nacelle_col],
-                mode="markers",
-                marker=dict(
-                    size=5,
-                    opacity=0.30,
-                    color="rgba(0,128,128,0.55)",
-                    line=dict(width=0),
-                ),
-                name=f"Nacelle Samples ({nacelle_sample_count})",
-                hovertemplate=(
-                    f"{wind_col}: " + "%{x:.2f} m/s<br>"
-                    f"{nacelle_col}: " + "%{y:.2f}°<extra>Nacelle Sample</extra>"
-                ),
-            )
-        )
-
-    if not nacelle_curve.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=nacelle_curve["WindBin"],
-                y=nacelle_curve["AvgMetric"],
-                mode="lines+markers",
-                line=dict(width=2.5, color="#008080"),
-                marker=dict(size=6, color="#008080"),
-                name="Nacelle mean by 0.5 m/s bin",
-                hovertemplate=(
-                    "Wind Speed Bin: %{x:.2f} m/s<br>"
-                    "Avg Nacelle: %{y:.2f}°<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        title=f"{title} - Nacelle Graph",
-        xaxis=dict(
-            title="Wind Speed (m/s)",
-            range=[3, 15],
-            showgrid=True,
-            gridcolor="rgba(0,0,0,0.12)",
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Nacelle Position (°)",
-            range=[0, 360],
-            showgrid=True,
-            gridcolor="rgba(0,0,0,0.12)",
-            zeroline=False,
-        ),
-        height=480,
-        template="plotly_white",
-        hovermode="closest",
-        legend=dict(
-            orientation="v",
-            x=0.01,
-            y=0.99,
-            bgcolor="rgba(255,255,255,0.85)"
-        ),
-        margin=dict(l=60, r=40, t=70, b=60),
-    )
-    return fig
-
 # =========================
 # DISPLAY
 # =========================
@@ -1050,33 +875,18 @@ for t in turbines_to_show:
     processed_results[t] = res
 
     st.markdown(f"## Turbine: {t}")
-    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Graph"])
 
-    with tab1:
-        fig_power = plot_power_curve(
-            res["power_curve_df"],
-            res["merged"],
-            res["turbine"],
-            res["avg_dev"],
-            res["comment"],
-            res["deviation_filter_rows"],
-        )
-        st.plotly_chart(fig_power, use_container_width=True)
-        st.caption(f"Deviation: {'NA' if res['avg_dev'] is None else round(res['avg_dev'], 2)}%")
-        st.caption(f"Filtered Power Samples: {res['deviation_filter_rows']}")
-        st.caption(res["comment"])
-
-    with tab2:
-        fig_nacelle = plot_nacelle_graph(
-            res["df_nacelle"],
-            res["nacelle_curve"],
-            res["turbine"],
-            res["avg_nacelle"],
-            res["nacelle_sample_count"],
-        )
-        st.plotly_chart(fig_nacelle, use_container_width=True)
-        st.caption(f"Nacelle Sample Formula: X = {wind_col}, Y = {nacelle_col}")
-        st.caption(f"Nacelle Samples Count: {res['nacelle_sample_count']}")
+    fig_power = plot_power_curve(
+        res["power_curve_df"],
+        res["merged"],
+        res["turbine"],
+        res["deviation_filter_rows"],
+    )
+    st.plotly_chart(fig_power, use_container_width=True)
+    st.caption(f"Deviation: {'NA' if res['avg_dev'] is None else round(res['avg_dev'], 2)}%")
+    st.caption(f"Base Power Samples: {res['base_power_sample_count']}")
+    st.caption(f"Deviation Filtered Samples: {res['deviation_filter_rows']}")
+    st.caption(res["comment"])
 
     st.divider()
 
@@ -1086,11 +896,8 @@ for t in turbines_to_show:
         {
             "Turbine": t,
             "Deviation_%": None if res["avg_dev"] is None else round(res["avg_dev"], 2),
-            "Avg_Nacelle": None if res["avg_nacelle"] is None else round(res["avg_nacelle"], 2),
-            "Nacelle_Band": get_nacelle_band(res["avg_nacelle"]),
-            "Dashboard_Power_Samples": res["dashboard_power_sample_count"],
+            "Base_Power_Samples": res["base_power_sample_count"],
             "Deviation_Filtered_Samples": res["deviation_filter_rows"],
-            "Nacelle_Samples": res["nacelle_sample_count"],
             "Status": res["status"],
             "Rows": res["raw_rows"],
             "Comment": res["comment"],
@@ -1112,7 +919,7 @@ if not results_df.empty:
 # =========================
 st.subheader(f"Detailed Power-Curve Analysis — {site}")
 st.caption(
-    "The summary tables below use the same logic as the standalone script: "
+    "The summary tables below use only the new standalone-style power-curve logic: "
     "required filters, selected-site reference interpolation, no extrapolation, "
     "and 0.5 m/s wind-speed bins."
 )
@@ -1293,13 +1100,10 @@ try:
     if not results_df.empty:
         for _, row in results_df.iterrows():
             dev_text = "NA" if pd.isna(row["Deviation_%"]) else row["Deviation_%"]
-            nac_text = "NA" if pd.isna(row["Avg_Nacelle"]) else row["Avg_Nacelle"]
             line = (
                 f"{row['Turbine']} | Dev: {dev_text}% | "
-                f"Nacelle: {nac_text}° | Band: {row['Nacelle_Band']} | "
-                f"Dashboard Power Samples: {row['Dashboard_Power_Samples']} | "
+                f"Base Power Samples: {row['Base_Power_Samples']} | "
                 f"Deviation Samples: {row['Deviation_Filtered_Samples']} | "
-                f"Nacelle Samples: {row['Nacelle_Samples']} | "
                 f"{row['Status']}"
             )
             pdf.drawString(40, y, line[:170])
