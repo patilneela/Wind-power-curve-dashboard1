@@ -1,6 +1,5 @@
 from pathlib import Path
 import io
-import os
 
 import numpy as np
 import pandas as pd
@@ -359,7 +358,6 @@ def make_fleet_power_curve_plotly(ref: pd.DataFrame, filtered: pd.DataFrame, fle
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
-
     return fig
 
 
@@ -392,7 +390,6 @@ def make_fleet_deviation_plotly(fleet_bins: pd.DataFrame):
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
-
     return fig
 
 
@@ -677,6 +674,26 @@ m3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 m4.metric("Reference curve", selected_curve)
 
 # =========================
+# SAFE WTG VIEW SELECTION
+# =========================
+available_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+
+selected_wtgs_view = st.multiselect(
+    "Select turbines to display in tables and turbine-focused views",
+    options=available_wtgs,
+    default=available_wtgs[: min(10, len(available_wtgs))] if available_wtgs else [],
+    help="For better performance, the default selection is limited. Add more turbines if needed.",
+)
+
+if not selected_wtgs_view:
+    st.warning("Please select at least one turbine to display.")
+    st.stop()
+
+filtered_view = results["filtered"][results["filtered"]["WTG"].isin(selected_wtgs_view)].copy()
+wtg_summary_view = results["wtg_summary"][results["wtg_summary"]["WTG"].isin(selected_wtgs_view)].copy()
+wtg_bins_view = results["wtg_bins"][results["wtg_bins"]["WTG"].isin(selected_wtgs_view)].copy()
+
+# =========================
 # SUMMARY TABLES
 # =========================
 left_col, right_col = st.columns([1, 1])
@@ -708,40 +725,45 @@ st.plotly_chart(fleet_dev_fig, width="stretch")
 # =========================
 st.subheader("Per-WTG analysis")
 
-available_result_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
 selected_wtg_view = st.selectbox(
-    "Select WTG for detailed view",
-    available_result_wtgs if available_result_wtgs else ["No WTG available"],
+    "Select one WTG for detailed power curve view",
+    selected_wtgs_view,
 )
 
-if available_result_wtgs:
-    filtered_wtg = results["filtered"][results["filtered"]["WTG"] == selected_wtg_view].copy()
-    wtg_bins_view = results["wtg_bins"][results["wtg_bins"]["WTG"] == selected_wtg_view].copy()
-    wtg_summary_view = results["wtg_summary"][results["wtg_summary"]["WTG"] == selected_wtg_view].copy()
+filtered_wtg = filtered_view[filtered_view["WTG"] == selected_wtg_view].copy()
+wtg_bins_single = wtg_bins_view[wtg_bins_view["WTG"] == selected_wtg_view].copy()
+wtg_summary_single = wtg_summary_view[wtg_summary_view["WTG"] == selected_wtg_view].copy()
 
-    wtg_fig = make_wtg_power_curve_plotly(
-        results["ref"], filtered_wtg, wtg_bins_view, selected_wtg_view
-    )
-    st.plotly_chart(wtg_fig, width="stretch")
+wtg_fig = make_wtg_power_curve_plotly(
+    results["ref"], filtered_wtg, wtg_bins_single, selected_wtg_view
+)
+st.plotly_chart(wtg_fig, width="stretch")
 
-    if not wtg_summary_view.empty:
-        st.markdown("#### Selected WTG summary")
-        st.dataframe(wtg_summary_view, width="stretch", hide_index=True)
+if not wtg_summary_single.empty:
+    st.markdown("#### Selected WTG summary")
+    st.dataframe(wtg_summary_single, width="stretch", hide_index=True)
 
 # =========================
 # MULTI-WTG COMPARISON
 # =========================
 st.subheader("Multi-WTG comparison")
 
-multi_default = available_result_wtgs[: min(5, len(available_result_wtgs))]
+default_compare = selected_wtgs_view[: min(5, len(selected_wtgs_view))]
 selected_compare_wtgs = st.multiselect(
     "Select WTGs to compare on one chart",
-    options=available_result_wtgs,
-    default=multi_default,
+    options=selected_wtgs_view,
+    default=default_compare,
+    help="Keep this selection small for better performance.",
 )
 
 if selected_compare_wtgs:
-    multi_fig = make_multi_wtg_comparison_plot(results, selected_compare_wtgs)
+    multi_fig = make_multi_wtg_comparison_plot(
+        {
+            "wtg_bins": wtg_bins_view,
+            "ref": results["ref"],
+        },
+        selected_compare_wtgs,
+    )
     st.plotly_chart(multi_fig, width="stretch")
 
 # =========================
@@ -749,7 +771,7 @@ if selected_compare_wtgs:
 # =========================
 st.subheader("Turbine ranking")
 
-ranking_df = results["wtg_summary"][
+ranking_df = wtg_summary_view[
     ["WTG", "ValidSamples", "MeanActualPower_kW", "MeanReferencePower_kW", "AggregateDeviation_pct"]
 ].copy()
 ranking_df = ranking_df.sort_values("AggregateDeviation_pct", na_position="last")
@@ -758,14 +780,14 @@ st.dataframe(ranking_df, width="stretch", hide_index=True)
 # =========================
 # DATA TABLES
 # =========================
-with st.expander("Show WTG summary"):
-    st.dataframe(results["wtg_summary"], width="stretch", hide_index=True)
+with st.expander("Show selected WTG summary"):
+    st.dataframe(wtg_summary_view, width="stretch", hide_index=True)
 
 with st.expander("Show fleet wind bin summary"):
     st.dataframe(results["fleet_bins"], width="stretch", hide_index=True)
 
-with st.expander("Show WTG wind bin summary"):
-    st.dataframe(results["wtg_bins"], width="stretch", hide_index=True)
+with st.expander("Show selected WTG wind bin summary"):
+    st.dataframe(wtg_bins_view, width="stretch", hide_index=True)
 
 with st.expander("Show filtered SCADA sample"):
     preview_cols = [
@@ -783,7 +805,7 @@ with st.expander("Show filtered SCADA sample"):
         "WindSpeedBin_mps",
     ]
     st.dataframe(
-        results["filtered"][preview_cols].head(300),
+        filtered_view[preview_cols].head(300),
         width="stretch",
         hide_index=True,
     )
@@ -798,7 +820,7 @@ d1, d2, d3 = st.columns(3)
 with d1:
     st.download_button(
         "Download filtered SCADA CSV",
-        data=to_csv_bytes(results["filtered"]),
+        data=to_csv_bytes(filtered_view),
         file_name="filtered_scada_power_curve.csv",
         mime="text/csv",
     )
@@ -806,7 +828,7 @@ with d1:
 with d2:
     st.download_button(
         "Download WTG summary CSV",
-        data=to_csv_bytes(results["wtg_summary"]),
+        data=to_csv_bytes(wtg_summary_view),
         file_name="wtg_summary_power_curve.csv",
         mime="text/csv",
     )
@@ -828,9 +850,8 @@ if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
     pdf_figures = [
         ("Fleet Power Curve Comparison", fleet_power_fig),
         ("Fleet Deviation by Wind-Speed Bin", fleet_dev_fig),
+        (f"{selected_wtg_view} Power Curve Comparison", wtg_fig),
     ]
-    if available_result_wtgs:
-        pdf_figures.append((f"{selected_wtg_view} Power Curve Comparison", wtg_fig))
 
     try:
         pdf_bytes = build_pdf_report(
