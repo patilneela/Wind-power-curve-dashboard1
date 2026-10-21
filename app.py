@@ -1,6 +1,6 @@
 from pathlib import Path
 import io
-import os
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -70,7 +70,7 @@ def get_status_color(status: str) -> str:
         "Abnormal High": "#6A1B9A",
         "NA": "#9E9E9E",
     }
-    return color_map.get(status, "#9E9E9E")
+    return color_map.get(status, "#FFFFFF")
 
 
 def style_wtg_summary(df: pd.DataFrame):
@@ -83,7 +83,7 @@ def style_wtg_summary(df: pd.DataFrame):
             return ""
         status, _ = get_status_and_comment(val)
         color = get_status_color(status)
-        return f"background-color: {color}; color: white; font-weight: bold;"
+        return f"background-color: {color}; color: white;"
 
     styled = df.style.format(
         {
@@ -104,30 +104,6 @@ def style_wtg_summary(df: pd.DataFrame):
         styled = styled.map(style_performance, subset=["Performance_pct"])
 
     return styled
-
-
-def render_status_badge(perf: float):
-    status, comment = get_status_and_comment(perf)
-    color = get_status_color(status)
-    perf_text = "NA" if pd.isna(perf) else f"{perf:.2f}%"
-
-    st.markdown(
-        f"""
-        <div style="
-            background-color:{color};
-            color:white;
-            padding:12px 16px;
-            border-radius:10px;
-            margin:8px 0 14px 0;
-            font-weight:600;
-            box-shadow:0 2px 6px rgba(0,0,0,0.12);
-        ">
-            <div style="font-size:18px; margin-bottom:4px;">Deviation / Performance: {perf_text}</div>
-            <div style="font-size:14px;">{comment}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 @st.cache_data(show_spinner=False)
@@ -308,6 +284,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
     status_comment = wtg_summary["MeanPerformance_pct"].apply(get_status_and_comment)
     wtg_summary["Status"] = status_comment.apply(lambda x: x[0])
     wtg_summary["PerformanceComment"] = status_comment.apply(lambda x: x[1])
+
     wtg_summary["Performance_pct"] = wtg_summary["MeanPerformance_pct"].round(2)
 
     wtg_summary = wtg_summary[
@@ -345,7 +322,6 @@ def make_wtg_power_curve_plotly(
     filtered_wtg: pd.DataFrame,
     wtg_bins: pd.DataFrame,
     wtg_name: str,
-    status_color: str,
 ):
     fig = go.Figure()
 
@@ -355,7 +331,7 @@ def make_wtg_power_curve_plotly(
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
             name=f"{wtg_name} SCADA",
-            marker=dict(size=5, opacity=0.18, color=status_color),
+            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
         )
     )
 
@@ -376,8 +352,8 @@ def make_wtg_power_curve_plotly(
                 y=wtg_bins["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=3, color=status_color),
-                marker=dict(size=6, color=status_color),
+                line=dict(width=3, color="#2ca02c"),
+                marker=dict(size=6),
             )
         )
 
@@ -389,7 +365,6 @@ def make_wtg_power_curve_plotly(
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=dict(l=40, r=40, t=70, b=40),
-        legend=dict(orientation="h", y=1.02, x=0),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
@@ -482,8 +457,6 @@ if not all_wtgs:
 
 st.subheader(f"All Turbine Graphs ({len(all_wtgs)})")
 
-summary_lookup = results["wtg_summary"].set_index("WTG")
-
 for wtg in all_wtgs:
     filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
     wtg_bins = results["wtg_bins"][results["wtg_bins"]["WTG"] == wtg].copy()
@@ -491,18 +464,6 @@ for wtg in all_wtgs:
     if filtered_wtg.empty:
         continue
 
-    perf = summary_lookup.loc[wtg, "Performance_pct"] if wtg in summary_lookup.index else np.nan
-    status = summary_lookup.loc[wtg, "Status"] if wtg in summary_lookup.index else "NA"
-    status_color = get_status_color(status)
-
     st.markdown(f"### {wtg}")
-    render_status_badge(perf)
-
-    fig = make_wtg_power_curve_plotly(
-        results["ref"],
-        filtered_wtg,
-        wtg_bins,
-        wtg,
-        status_color,
-    )
+    fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
     st.plotly_chart(fig, use_container_width=True)
