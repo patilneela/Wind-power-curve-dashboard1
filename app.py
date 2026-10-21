@@ -93,11 +93,11 @@ def get_nacelle_band(avg_nacelle):
 
 def get_nacelle_band_color(band: str) -> str:
     color_map = {
-        "0-60": "#2E7D32",      # green
-        "60-120": "#FDD835",    # yellow
-        "120-180": "#FB8C00",   # orange
-        "180-240": "#EC407A",   # pink
-        "240-360": "#E53935",   # red
+        "0-60": "#2E7D32",
+        "60-120": "#FDD835",
+        "120-180": "#FB8C00",
+        "180-240": "#EC407A",
+        "240-360": "#E53935",
         "Out of Range": "#6D4C41",
         "NA": "#9E9E9E",
     }
@@ -544,15 +544,15 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
     band_colors = filtered_wtg["NacelleBand"].map(get_nacelle_band_color)
     hover_text = (
         "Band: " + filtered_wtg["NacelleBand"].astype(str)
-        + "<br>Nacelle Position: " + filtered_wtg["NacellePositionAve"].round(2).astype(str) + "°"
+        + "<br>Wind Speed: " + filtered_wtg["WindSpeed_mps"].round(2).astype(str) + " m/s"
     )
 
     fig = go.Figure()
 
     fig.add_trace(
         go.Scattergl(
-            x=filtered_wtg["WindSpeed_mps"],
-            y=filtered_wtg["NacellePositionAve"],
+            x=filtered_wtg["NacellePositionAve"],
+            y=filtered_wtg["WindSpeed_mps"],
             mode="markers",
             name=f"{wtg_name} Scatter",
             marker=dict(
@@ -561,35 +561,35 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
                 color=band_colors,
             ),
             text=hover_text,
-            hovertemplate="Wind Speed: %{x:.2f} m/s<br>%{text}<extra></extra>",
+            hovertemplate="Nacelle Position: %{x:.2f}°<br>Wind Speed: %{y:.2f} m/s<br>%{text}<extra></extra>",
         )
     )
 
     if not nacelle_bins.empty:
         fig.add_trace(
             go.Scatter(
-                x=nacelle_bins["MeanWindSpeed_mps"],
-                y=nacelle_bins["MeanNacellePosition"],
+                x=nacelle_bins["MeanNacellePosition"],
+                y=nacelle_bins["MeanWindSpeed_mps"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=3, color="#2ca02c"),
                 marker=dict(size=7, color="#2ca02c"),
-                hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Nacelle Position: %{y:.2f}°<extra></extra>",
+                hovertemplate="Mean Nacelle Position: %{x:.2f}°<br>Mean Wind Speed: %{y:.2f} m/s<extra></extra>",
             )
         )
 
     fig.update_layout(
-        title=f"{wtg_name} Wind Speed vs Nacelle Position",
-        xaxis_title="Wind Speed (m/s)",
-        yaxis_title="Nacelle Position Ave (°)",
+        title=f"{wtg_name} Nacelle Position vs Wind Speed",
+        xaxis_title="Nacelle Position Ave (°)",
+        yaxis_title="Wind Speed (m/s)",
         height=480,
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
-    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5", range=[0, 360])
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5", range=[0, 360])
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
 
@@ -692,7 +692,7 @@ c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
 if results["has_nacelle"]:
-    tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position"])
+    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Position vs Wind Speed"])
 else:
     tab1 = st.container()
     tab2 = None
