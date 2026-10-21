@@ -1,5 +1,6 @@
 from pathlib import Path
 import io
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -44,19 +45,19 @@ def get_status_and_comment(perf):
     perf = round(perf, 2)
 
     if perf < 28:
-        return "Extreme Issue", f"Performance: {perf}% → Extreme issue (Data unreliable)"
+        return "Extreme Issue", f"Extreme issue (Data unreliable)"
     elif perf < 92:
-        return "Severe Underperformance", f"Performance: {perf}% → Severe underperformance (Blade/Dust/Yaw issue)"
+        return "Severe Underperformance", f"Severe underperformance (Blade/Dust/Yaw issue)"
     elif perf < 98:
-        return "Underperformance", f"Performance: {perf}% → Underperformance"
+        return "Underperformance", f"Underperformance"
     elif perf > 172:
-        return "Abnormal High", f"Performance: {perf}% → Abnormal high (Sensor/Data issue)"
+        return "Abnormal High", f"Abnormal high (Sensor/Data issue)"
     elif perf > 108:
-        return "High Overperformance", f"Performance: {perf}% → High overperformance"
+        return "High Overperformance", f"High overperformance"
     elif perf > 102:
-        return "Slight Overperformance", f"Performance: {perf}% → Slight overperformance"
+        return "Slight Overperformance", f"Slight overperformance"
     else:
-        return "Normal", f"Performance: {perf}% → Normal performance"
+        return "Normal", f"Normal performance"
 
 
 def get_status_color(status: str) -> str:
@@ -70,7 +71,7 @@ def get_status_color(status: str) -> str:
         "Abnormal High": "#6A1B9A",
         "NA": "#9E9E9E",
     }
-    return color_map.get(status, "#FFFFFF")
+    return color_map.get(status, "#9E9E9E")
 
 
 def style_wtg_summary(df: pd.DataFrame):
@@ -83,17 +84,17 @@ def style_wtg_summary(df: pd.DataFrame):
             return ""
         status, _ = get_status_and_comment(val)
         color = get_status_color(status)
-        return f"background-color: {color}; color: white;"
+        return f"background-color: {color}; color: white; font-weight: bold;"
 
     styled = df.style.format(
         {
+            "Performance_pct": "{:.2f}",
             "MeanWindSpeed_mps": "{:.2f}",
             "MeanActualPower_kW": "{:.2f}",
             "MeanReferencePower_kW": "{:.2f}",
             "MeanDeviation_kW": "{:.2f}",
             "MeanSampleDeviation_pct": "{:.2f}",
             "AggregateDeviation_pct": "{:.2f}",
-            "Performance_pct": "{:.2f}",
         }
     )
 
@@ -104,6 +105,45 @@ def style_wtg_summary(df: pd.DataFrame):
         styled = styled.map(style_performance, subset=["Performance_pct"])
 
     return styled
+
+
+def render_status_badge(wtg: str, perf: float, dev: float, comment: str):
+    status, _ = get_status_and_comment(perf)
+    color = get_status_color(status)
+
+    perf_text = "NA" if pd.isna(perf) else f"{perf:.2f}%"
+    dev_text = "NA" if pd.isna(dev) else f"{dev:.2f}%"
+    comment_text = comment if comment and str(comment).strip() else "Performance comment not available"
+
+    st.markdown(
+        f"""
+        <div style="
+            background-color:{color};
+            color:white;
+            padding:14px 18px;
+            border-radius:12px;
+            margin:8px 0 14px 0;
+            font-weight:600;
+            box-shadow:0 2px 8px rgba(0,0,0,0.12);
+        ">
+            <div style="font-size:20px; margin-bottom:6px;">{wtg}</div>
+            <div style="font-size:16px; margin-bottom:4px;">
+                Performance: {perf_text} | Deviation: {dev_text}
+            </div>
+            <div style="font-size:14px; line-height:1.5;">
+                Comment: {comment_text}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_last_month_range(today_value: date) -> tuple[date, date]:
+    first_day_this_month = today_value.replace(day=1)
+    last_day_last_month = first_day_this_month - timedelta(days=1)
+    first_day_last_month = last_day_last_month.replace(day=1)
+    return first_day_last_month, last_day_last_month
 
 
 @st.cache_data(show_spinner=False)
@@ -284,7 +324,6 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
     status_comment = wtg_summary["MeanPerformance_pct"].apply(get_status_and_comment)
     wtg_summary["Status"] = status_comment.apply(lambda x: x[0])
     wtg_summary["PerformanceComment"] = status_comment.apply(lambda x: x[1])
-
     wtg_summary["Performance_pct"] = wtg_summary["MeanPerformance_pct"].round(2)
 
     wtg_summary = wtg_summary[
@@ -353,7 +392,7 @@ def make_wtg_power_curve_plotly(
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=3, color="#2ca02c"),
-                marker=dict(size=6),
+                marker=dict(size=6, color="#2ca02c"),
             )
         )
 
@@ -365,6 +404,7 @@ def make_wtg_power_curve_plotly(
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=dict(l=40, r=40, t=70, b=40),
+        legend=dict(orientation="h", y=1.02, x=0),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
@@ -398,22 +438,52 @@ valid_time = scada[TIME_COL].dropna()
 date_text = "All available dates"
 
 if not valid_time.empty:
-    min_date = valid_time.min().date()
-    max_date = valid_time.max().date()
+    data_min_date = valid_time.min().date()
+    data_max_date = valid_time.max().date()
+    today_value = data_max_date
 
-    date_range = st.sidebar.date_input(
-        "Date range",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date,
+    date_filter_type = st.sidebar.radio(
+        "Date Filter",
+        ["Today", "Last 7 Days", "This Month", "Last Month", "Manual Calendar"],
+        index=4,
     )
 
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-        start_date, end_date = date_range
-        scada_filtered = scada_filtered[
-            scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
-        ].copy()
-        date_text = f"{start_date} to {end_date}"
+    if date_filter_type == "Today":
+        start_date = today_value
+        end_date = today_value
+
+    elif date_filter_type == "Last 7 Days":
+        start_date = today_value - timedelta(days=6)
+        end_date = today_value
+
+    elif date_filter_type == "This Month":
+        start_date = today_value.replace(day=1)
+        end_date = today_value
+
+    elif date_filter_type == "Last Month":
+        start_date, end_date = get_last_month_range(today_value)
+
+    else:
+        manual_range = st.sidebar.date_input(
+            "Date range",
+            value=(data_min_date, data_max_date),
+            min_value=data_min_date,
+            max_value=data_max_date,
+        )
+
+        if isinstance(manual_range, (tuple, list)) and len(manual_range) == 2:
+            start_date, end_date = manual_range
+        else:
+            start_date, end_date = data_min_date, data_max_date
+
+    start_date = max(start_date, data_min_date)
+    end_date = min(end_date, data_max_date)
+
+    scada_filtered = scada_filtered[
+        scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
+    ].copy()
+
+    date_text = f"{start_date} to {end_date}"
 
 site_name = selected_curve
 
@@ -457,6 +527,8 @@ if not all_wtgs:
 
 st.subheader(f"All Turbine Graphs ({len(all_wtgs)})")
 
+summary_lookup = results["wtg_summary"].set_index("WTG")
+
 for wtg in all_wtgs:
     filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
     wtg_bins = results["wtg_bins"][results["wtg_bins"]["WTG"] == wtg].copy()
@@ -464,6 +536,16 @@ for wtg in all_wtgs:
     if filtered_wtg.empty:
         continue
 
-    st.markdown(f"### {wtg}")
-    fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
+    perf = summary_lookup.loc[wtg, "Performance_pct"] if wtg in summary_lookup.index else np.nan
+    dev = summary_lookup.loc[wtg, "AggregateDeviation_pct"] if wtg in summary_lookup.index else np.nan
+    comment = summary_lookup.loc[wtg, "PerformanceComment"] if wtg in summary_lookup.index else "Performance comment not available"
+
+    render_status_badge(wtg, perf, dev, comment)
+
+    fig = make_wtg_power_curve_plotly(
+        results["ref"],
+        filtered_wtg,
+        wtg_bins,
+        wtg,
+    )
     st.plotly_chart(fig, use_container_width=True)
