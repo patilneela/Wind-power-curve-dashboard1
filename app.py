@@ -27,11 +27,6 @@ REQUIRED_SCADA_COLUMNS = [
     POWER_COL,
 ]
 
-BASE_DIR = Path(__file__).resolve().parent
-UPLOADS_DIR = BASE_DIR / "uploads"
-DEFAULT_CSV_PATH = UPLOADS_DIR / "EN-156-3.3_20260801_20260826_ten_minutes-1792412779244.csv"
-DEFAULT_XLSX_PATH = UPLOADS_DIR / "All Sites Specific Power Curve data_ENV1-1792412779249.xlsx"
-
 
 def ensure_required_columns(df: pd.DataFrame, required: list[str], label: str) -> None:
     missing = [col for col in required if col not in df.columns]
@@ -60,7 +55,11 @@ def load_reference_curves(file_bytes: bytes, file_name: str) -> dict[str, pd.Dat
     if not file_name.lower().endswith(".xlsx"):
         raise ValueError("Reference input must be an XLSX file.")
 
-    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Power Curve", header=None)
+    try:
+        raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Power Curve", header=None)
+    except ValueError:
+        raise ValueError("The Excel file must contain a sheet named 'Power Curve'.")
+
     if raw.shape[0] < 4:
         raise ValueError("Reference workbook Power Curve sheet does not contain enough rows.")
 
@@ -271,44 +270,25 @@ def make_wtg_power_curve_plotly(
 
 
 st.title("Power Curve Dashboard")
-st.sidebar.header("Upload Files")
+st.write("Upload SCADA CSV and Reference Excel to view all turbine power curves after filtering.")
 
+st.sidebar.header("Upload Files")
 uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
 uploaded_ref = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"])
-use_default_files = st.sidebar.checkbox("Use default local files", value=True)
 
-scada_bytes = None
-scada_name = None
-ref_bytes = None
-ref_name = None
-
-if uploaded_scada is not None:
-    scada_bytes = uploaded_scada.getvalue()
-    scada_name = uploaded_scada.name
-elif use_default_files and DEFAULT_CSV_PATH.exists():
-    scada_bytes = DEFAULT_CSV_PATH.read_bytes()
-    scada_name = DEFAULT_CSV_PATH.name
-
-if uploaded_ref is not None:
-    ref_bytes = uploaded_ref.getvalue()
-    ref_name = uploaded_ref.name
-elif use_default_files and DEFAULT_XLSX_PATH.exists():
-    ref_bytes = DEFAULT_XLSX_PATH.read_bytes()
-    ref_name = DEFAULT_XLSX_PATH.name
-
-if scada_bytes is None:
-    st.warning("Please upload the SCADA CSV file.")
+if uploaded_scada is None:
+    st.info("Please upload the SCADA CSV file.")
     st.stop()
 
-if ref_bytes is None:
-    st.warning("Please upload the reference Excel file.")
+if uploaded_ref is None:
+    st.info("Please upload the reference Excel file.")
     st.stop()
 
 try:
-    scada = load_scada(scada_bytes, scada_name)
-    reference_curves = load_reference_curves(ref_bytes, ref_name)
+    scada = load_scada(uploaded_scada.getvalue(), uploaded_scada.name)
+    reference_curves = load_reference_curves(uploaded_ref.getvalue(), uploaded_ref.name)
 except Exception as exc:
-    st.error(f"Failed to load files: {exc}")
+    st.exception(exc)
     st.stop()
 
 curve_names = sorted(reference_curves.keys())
@@ -320,6 +300,7 @@ scada_filtered = scada.copy()
 if not valid_time.empty:
     min_date = valid_time.min().date()
     max_date = valid_time.max().date()
+
     date_range = st.sidebar.date_input(
         "Date range",
         value=(min_date, max_date),
@@ -327,7 +308,7 @@ if not valid_time.empty:
         max_value=max_date,
     )
 
-    if isinstance(date_range, tuple) and len(date_range) == 2:
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_date, end_date = date_range
         scada_filtered = scada_filtered[
             scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
@@ -340,7 +321,7 @@ if scada_filtered.empty:
 try:
     results = run_analysis(scada_filtered, reference_curves[selected_curve])
 except Exception as exc:
-    st.error(f"Analysis failed: {exc}")
+    st.exception(exc)
     st.stop()
 
 c1, c2, c3 = st.columns(3)
@@ -349,14 +330,18 @@ c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
 st.subheader("Filter Summary")
-st.dataframe(results["filter_counts"], width="stretch", hide_index=True)
+st.dataframe(results["filter_counts"], use_container_width=True, hide_index=True)
 
 st.subheader("WTG Summary")
-st.dataframe(results["wtg_summary"], width="stretch", hide_index=True)
+st.dataframe(results["wtg_summary"], use_container_width=True, hide_index=True)
 
 st.subheader("All Turbine Graphs")
 
 all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+
+if not all_wtgs:
+    st.warning("No turbine data available after filtering.")
+    st.stop()
 
 for wtg in all_wtgs:
     filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
@@ -371,4 +356,4 @@ for wtg in all_wtgs:
         wtg_bins,
         wtg,
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
