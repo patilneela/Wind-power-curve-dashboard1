@@ -16,7 +16,7 @@ WIND_SPEED_COL = "WindSpeedAve"
 WIND_STD_COL = "WindSpeedStd"
 PITCH_STD_COL = "BladePitchStd"
 POWER_COL = "ActivePWAve"
-NACELLE_STD_COL = "NacellePositionStd"
+NACELLE_COL = "NacellePositionAve"
 BIN_WIDTH = 0.5
 
 REQUIRED_SCADA_COLUMNS = [
@@ -75,28 +75,30 @@ def get_status_color(status: str) -> str:
     return color_map.get(status, "#9E9E9E")
 
 
-def get_nacelle_std_band(avg_std):
-    if avg_std is None or pd.isna(avg_std):
+def get_nacelle_band(avg_nacelle):
+    if avg_nacelle is None or pd.isna(avg_nacelle):
         return "NA"
-    if avg_std < 2:
-        return "0-2"
-    elif avg_std < 5:
-        return "2-5"
-    elif avg_std < 10:
-        return "5-10"
-    elif avg_std < 20:
-        return "10-20"
-    else:
-        return "20+"
+    if 0 <= avg_nacelle < 60:
+        return "0-60"
+    elif 60 <= avg_nacelle < 120:
+        return "60-120"
+    elif 120 <= avg_nacelle < 180:
+        return "120-180"
+    elif 180 <= avg_nacelle < 240:
+        return "180-240"
+    elif 240 <= avg_nacelle <= 360:
+        return "240-360"
+    return "Out of Range"
 
 
-def get_nacelle_std_color(band: str) -> str:
+def get_nacelle_band_color(band: str) -> str:
     color_map = {
-        "0-2": "#43A047",
-        "2-5": "#1E88E5",
-        "5-10": "#FB8C00",
-        "10-20": "#E53935",
-        "20+": "#8B0000",
+        "0-60": "#2E7D32",      # green
+        "60-120": "#FDD835",    # yellow
+        "120-180": "#FB8C00",   # orange
+        "180-240": "#EC407A",   # pink
+        "240-360": "#E53935",   # red
+        "Out of Range": "#6D4C41",
         "NA": "#9E9E9E",
     }
     return color_map.get(band, "#9E9E9E")
@@ -137,18 +139,19 @@ def style_wtg_summary(df: pd.DataFrame):
 
 def style_nacelle_summary(df: pd.DataFrame):
     def style_band(val):
-        color = get_nacelle_std_color(val)
-        return f"background-color: {color}; color: white; font-weight: bold;"
+        color = get_nacelle_band_color(val)
+        text_color = "black" if val == "60-120" else "white"
+        return f"background-color: {color}; color: {text_color}; font-weight: bold;"
 
     styled = df.style.format(
         {
             "MeanWindSpeed_mps": "{:.2f}",
-            "MeanNacelleStd": "{:.2f}",
+            "MeanNacellePosition": "{:.2f}",
         }
     )
 
-    if "NacelleStdBand" in df.columns:
-        styled = styled.map(style_band, subset=["NacelleStdBand"])
+    if "NacelleBand" in df.columns:
+        styled = styled.map(style_band, subset=["NacelleBand"])
 
     return styled
 
@@ -185,15 +188,16 @@ def render_status_badge(wtg: str, perf: float, dev: float, comment: str):
     )
 
 
-def render_nacelle_badge(wtg: str, avg_std: float, band: str):
-    color = get_nacelle_std_color(band)
-    std_text = "NA" if pd.isna(avg_std) else f"{avg_std:.2f}"
+def render_nacelle_badge(wtg: str, avg_nacelle: float, band: str):
+    color = get_nacelle_band_color(band)
+    text_color = "black" if band == "60-120" else "white"
+    nacelle_text = "NA" if pd.isna(avg_nacelle) else f"{avg_nacelle:.2f}°"
 
     st.markdown(
         f"""
         <div style="
             background-color:{color};
-            color:white;
+            color:{text_color};
             padding:14px 18px;
             border-radius:12px;
             margin:8px 0 14px 0;
@@ -202,7 +206,7 @@ def render_nacelle_badge(wtg: str, avg_std: float, band: str):
         ">
             <div style="font-size:20px; margin-bottom:6px;">{wtg}</div>
             <div style="font-size:16px; margin-bottom:4px;">
-                Avg Nacelle Position Std: {std_text}
+                Avg Nacelle Position: {nacelle_text}
             </div>
             <div style="font-size:14px; line-height:1.5;">
                 Band: {band}
@@ -229,8 +233,8 @@ def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     ensure_required_columns(df, REQUIRED_SCADA_COLUMNS, "SCADA file")
 
     numeric_cols = [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]
-    if NACELLE_STD_COL in df.columns:
-        numeric_cols.append(NACELLE_STD_COL)
+    if NACELLE_COL in df.columns:
+        numeric_cols.append(NACELLE_COL)
 
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -314,8 +318,8 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         WIND_SPEED_COL: "WindSpeed_mps",
         POWER_COL: "ActualPower_kW",
     }
-    if NACELLE_STD_COL in filtered.columns:
-        rename_map[NACELLE_STD_COL] = "NacellePositionStd"
+    if NACELLE_COL in filtered.columns:
+        rename_map[NACELLE_COL] = "NacellePositionAve"
 
     filtered = filtered.rename(columns=rename_map)
 
@@ -433,47 +437,49 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "rows_passing": int(mask.sum()),
         "rows_compared": len(filtered),
         "wtg_count": int(filtered["WTG"].nunique()),
-        "has_nacelle_std": "NacellePositionStd" in filtered.columns,
+        "has_nacelle": "NacellePositionAve" in filtered.columns,
     }
 
-    if "NacellePositionStd" in filtered.columns:
-        nacelle_filtered = filtered.dropna(subset=["NacellePositionStd"]).copy()
+    if "NacellePositionAve" in filtered.columns:
+        nacelle_filtered = filtered.dropna(subset=["NacellePositionAve"]).copy()
+        nacelle_filtered["NacelleBand"] = nacelle_filtered["NacellePositionAve"].apply(get_nacelle_band)
 
         nacelle_bins = (
             nacelle_filtered.groupby(["WTG", "WindSpeedBin_mps"])
             .agg(
-                Samples=("NacellePositionStd", "size"),
+                Samples=("NacellePositionAve", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-                MeanNacelleStd=("NacellePositionStd", "mean"),
+                MeanNacellePosition=("NacellePositionAve", "mean"),
             )
             .reset_index()
         )
+        nacelle_bins["NacelleBand"] = nacelle_bins["MeanNacellePosition"].apply(get_nacelle_band)
 
         nacelle_summary = (
             nacelle_filtered.groupby("WTG")
             .agg(
-                ValidSamples=("NacellePositionStd", "size"),
+                ValidSamples=("NacellePositionAve", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-                MeanNacelleStd=("NacellePositionStd", "mean"),
+                MeanNacellePosition=("NacellePositionAve", "mean"),
                 FirstTimestamp=("DateTime", "min"),
                 LastTimestamp=("DateTime", "max"),
             )
             .reset_index()
         )
 
-        nacelle_summary["NacelleStdBand"] = nacelle_summary["MeanNacelleStd"].apply(get_nacelle_std_band)
+        nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePosition"].apply(get_nacelle_band)
 
         nacelle_summary = nacelle_summary[
             [
                 "WTG",
                 "ValidSamples",
                 "MeanWindSpeed_mps",
-                "MeanNacelleStd",
-                "NacelleStdBand",
+                "MeanNacellePosition",
+                "NacelleBand",
                 "FirstTimestamp",
                 "LastTimestamp",
             ]
-        ].sort_values("MeanNacelleStd")
+        ].sort_values("MeanNacellePosition")
 
         results["nacelle_bins"] = nacelle_bins
         results["nacelle_summary"] = nacelle_summary
@@ -534,17 +540,28 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     return fig
 
 
-def make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg_name):
+def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
+    band_colors = filtered_wtg["NacelleBand"].map(get_nacelle_band_color)
+    hover_text = (
+        "Band: " + filtered_wtg["NacelleBand"].astype(str)
+        + "<br>Nacelle Position: " + filtered_wtg["NacellePositionAve"].round(2).astype(str) + "°"
+    )
+
     fig = go.Figure()
 
     fig.add_trace(
         go.Scattergl(
             x=filtered_wtg["WindSpeed_mps"],
-            y=filtered_wtg["NacellePositionStd"],
+            y=filtered_wtg["NacellePositionAve"],
             mode="markers",
-            name=f"{wtg_name} Nacelle Position Std",
-            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
-            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Nacelle Position Std: %{y:.2f}<extra></extra>",
+            name=f"{wtg_name} Scatter",
+            marker=dict(
+                size=6,
+                opacity=0.45,
+                color=band_colors,
+            ),
+            text=hover_text,
+            hovertemplate="Wind Speed: %{x:.2f} m/s<br>%{text}<extra></extra>",
         )
     )
 
@@ -552,19 +569,19 @@ def make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg_name):
         fig.add_trace(
             go.Scatter(
                 x=nacelle_bins["MeanWindSpeed_mps"],
-                y=nacelle_bins["MeanNacelleStd"],
+                y=nacelle_bins["MeanNacellePosition"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=3, color="#2ca02c"),
-                marker=dict(size=6, color="#2ca02c"),
-                hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Nacelle Position Std: %{y:.2f}<extra></extra>",
+                marker=dict(size=7, color="#2ca02c"),
+                hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Nacelle Position: %{y:.2f}°<extra></extra>",
             )
         )
 
     fig.update_layout(
-        title=f"{wtg_name} Wind Speed vs Nacelle Position Std",
+        title=f"{wtg_name} Wind Speed vs Nacelle Position",
         xaxis_title="Wind Speed (m/s)",
-        yaxis_title="Nacelle Position Std",
+        yaxis_title="Nacelle Position Ave (°)",
         height=480,
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -572,7 +589,7 @@ def make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg_name):
         legend=dict(orientation="h", y=1.02, x=0),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
-    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5", range=[0, 360])
     return fig
 
 
@@ -674,13 +691,13 @@ c1.metric("Rows passing filters", f"{results['rows_passing']:,}")
 c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
-if results["has_nacelle_std"]:
-    tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position Std"])
+if results["has_nacelle"]:
+    tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position"])
 else:
     tab1 = st.container()
     tab2 = None
     st.warning(
-        f"Nacelle std tab is hidden because column '{NACELLE_STD_COL}' was not found in the uploaded SCADA file."
+        f"Nacelle tab is hidden because column '{NACELLE_COL}' was not found in the uploaded SCADA file."
     )
 
 with tab1:
@@ -714,28 +731,30 @@ with tab1:
 if tab2 is not None:
     with tab2:
         if results["nacelle_summary"].empty:
-            st.warning("Nacelle position std data is not available after filtering.")
+            st.warning("Nacelle position data is not available after filtering.")
         else:
-            st.subheader("Nacelle Position Std Summary")
+            st.subheader("Nacelle Position Summary")
             st.table(style_nacelle_summary(results["nacelle_summary"]))
 
             all_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
             nacelle_lookup = results["nacelle_summary"].set_index("WTG")
 
-            st.subheader(f"All Turbine Nacelle Position Std Curves ({len(all_wtgs)})")
+            st.subheader(f"All Turbine Nacelle Position Graphs ({len(all_wtgs)})")
 
             for wtg in all_wtgs:
                 filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
-                filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionStd"]).copy()
+                filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionAve"]).copy()
+                filtered_wtg["NacelleBand"] = filtered_wtg["NacellePositionAve"].apply(get_nacelle_band)
+
                 nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
 
                 if filtered_wtg.empty:
                     continue
 
-                avg_std = nacelle_lookup.loc[wtg, "MeanNacelleStd"] if wtg in nacelle_lookup.index else np.nan
-                nacelle_band = nacelle_lookup.loc[wtg, "NacelleStdBand"] if wtg in nacelle_lookup.index else "NA"
+                avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
+                nacelle_band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
 
-                render_nacelle_badge(wtg, avg_std, nacelle_band)
+                render_nacelle_badge(wtg, avg_nacelle, nacelle_band)
 
-                fig = make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg)
+                fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
