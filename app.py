@@ -16,7 +16,7 @@ WIND_SPEED_COL = "WindSpeedAve"
 WIND_STD_COL = "WindSpeedStd"
 PITCH_STD_COL = "BladePitchStd"
 POWER_COL = "ActivePWAve"
-NACELLE_COL = "NacellePosition"
+NACELLE_COL = "NacellePosition"   # change this if your real CSV column name is different
 BIN_WIDTH = 0.5
 
 REQUIRED_SCADA_COLUMNS = [
@@ -27,7 +27,6 @@ REQUIRED_SCADA_COLUMNS = [
     WIND_STD_COL,
     PITCH_STD_COL,
     POWER_COL,
-    NACELLE_COL,
 ]
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -231,7 +230,11 @@ def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
     ensure_required_columns(df, REQUIRED_SCADA_COLUMNS, "SCADA file")
 
-    for col in [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL, NACELLE_COL]:
+    numeric_cols = [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]
+    if NACELLE_COL in df.columns:
+        numeric_cols.append(NACELLE_COL)
+
+    for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce", dayfirst=True)
@@ -307,15 +310,16 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         columns=["Filter Stage", "Record Count"],
     )
 
-    filtered = filtered.rename(
-        columns={
-            WTG_COL: "WTG",
-            TIME_COL: "DateTime",
-            WIND_SPEED_COL: "WindSpeed_mps",
-            POWER_COL: "ActualPower_kW",
-            NACELLE_COL: "NacellePosition",
-        }
-    )
+    rename_map = {
+        WTG_COL: "WTG",
+        TIME_COL: "DateTime",
+        WIND_SPEED_COL: "WindSpeed_mps",
+        POWER_COL: "ActualPower_kW",
+    }
+    if NACELLE_COL in filtered.columns:
+        rename_map[NACELLE_COL] = "NacellePosition"
+
+    filtered = filtered.rename(columns=rename_map)
 
     ref_working = ref.copy()
     for col in ["ReferenceWindSpeed_mps", "ReferencePower_kW"]:
@@ -376,30 +380,6 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         .reset_index()
     )
 
-    nacelle_bins = (
-        filtered.groupby(["WTG", "WindSpeedBin_mps"])
-        .agg(
-            Samples=("NacellePosition", "size"),
-            MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-            MeanNacellePosition=("NacellePosition", "mean"),
-        )
-        .reset_index()
-    )
-
-    nacelle_summary = (
-        filtered.groupby("WTG")
-        .agg(
-            ValidSamples=("NacellePosition", "size"),
-            MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-            MeanNacellePosition=("NacellePosition", "mean"),
-            FirstTimestamp=("DateTime", "min"),
-            LastTimestamp=("DateTime", "max"),
-        )
-        .reset_index()
-    )
-
-    nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePosition"].apply(get_nacelle_band)
-
     wtg_summary = (
         filtered.groupby("WTG")
         .agg(
@@ -446,30 +426,64 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         ]
     ].sort_values("Performance_pct")
 
-    nacelle_summary = nacelle_summary[
-        [
-            "WTG",
-            "ValidSamples",
-            "MeanWindSpeed_mps",
-            "MeanNacellePosition",
-            "NacelleBand",
-            "FirstTimestamp",
-            "LastTimestamp",
-        ]
-    ].sort_values("MeanNacellePosition")
-
-    return {
+    results = {
         "filtered": filtered,
         "filter_counts": filter_counts,
         "wtg_bins": wtg_bins,
-        "nacelle_bins": nacelle_bins,
-        "nacelle_summary": nacelle_summary,
         "wtg_summary": wtg_summary,
         "ref": ref_working,
         "rows_passing": int(mask.sum()),
         "rows_compared": len(filtered),
         "wtg_count": int(filtered["WTG"].nunique()),
+        "has_nacelle": "NacellePosition" in filtered.columns,
     }
+
+    if "NacellePosition" in filtered.columns:
+        nacelle_filtered = filtered.dropna(subset=["NacellePosition"]).copy()
+
+        nacelle_bins = (
+            nacelle_filtered.groupby(["WTG", "WindSpeedBin_mps"])
+            .agg(
+                Samples=("NacellePosition", "size"),
+                MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+                MeanNacellePosition=("NacellePosition", "mean"),
+            )
+            .reset_index()
+        )
+
+        nacelle_summary = (
+            nacelle_filtered.groupby("WTG")
+            .agg(
+                ValidSamples=("NacellePosition", "size"),
+                MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+                MeanNacellePosition=("NacellePosition", "mean"),
+                FirstTimestamp=("DateTime", "min"),
+                LastTimestamp=("DateTime", "max"),
+            )
+            .reset_index()
+        )
+
+        nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePosition"].apply(get_nacelle_band)
+
+        nacelle_summary = nacelle_summary[
+            [
+                "WTG",
+                "ValidSamples",
+                "MeanWindSpeed_mps",
+                "MeanNacellePosition",
+                "NacelleBand",
+                "FirstTimestamp",
+                "LastTimestamp",
+            ]
+        ].sort_values("MeanNacellePosition")
+
+        results["nacelle_bins"] = nacelle_bins
+        results["nacelle_summary"] = nacelle_summary
+    else:
+        results["nacelle_bins"] = pd.DataFrame()
+        results["nacelle_summary"] = pd.DataFrame()
+
+    return results
 
 
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
@@ -662,7 +676,15 @@ c1.metric("Rows passing filters", f"{results['rows_passing']:,}")
 c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
-tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position"])
+if results["has_nacelle"]:
+    tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position"])
+else:
+    tab1 = st.container()
+    tab2 = None
+    st.warning(
+        f"Nacelle tab is hidden because column '{NACELLE_COL}' was not found in the uploaded SCADA file. "
+        f"If your file uses another column name, update NACELLE_COL in the code."
+    )
 
 with tab1:
     st.subheader("Filter Summary")
@@ -692,26 +714,31 @@ with tab1:
         fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
         st.plotly_chart(fig, use_container_width=True)
 
-with tab2:
-    st.subheader("Nacelle Position Summary")
-    st.table(style_nacelle_summary(results["nacelle_summary"]))
+if tab2 is not None:
+    with tab2:
+        if results["nacelle_summary"].empty:
+            st.warning("Nacelle position data is not available after filtering.")
+        else:
+            st.subheader("Nacelle Position Summary")
+            st.table(style_nacelle_summary(results["nacelle_summary"]))
 
-    all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
-    nacelle_lookup = results["nacelle_summary"].set_index("WTG")
+            all_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
+            nacelle_lookup = results["nacelle_summary"].set_index("WTG")
 
-    st.subheader(f"All Turbine Nacelle Position Curves ({len(all_wtgs)})")
+            st.subheader(f"All Turbine Nacelle Position Curves ({len(all_wtgs)})")
 
-    for wtg in all_wtgs:
-        filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
-        nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
+            for wtg in all_wtgs:
+                filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+                filtered_wtg = filtered_wtg.dropna(subset=["NacellePosition"]).copy()
+                nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
 
-        if filtered_wtg.empty:
-            continue
+                if filtered_wtg.empty:
+                    continue
 
-        avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
-        nacelle_band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
+                avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
+                nacelle_band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
 
-        render_nacelle_badge(wtg, avg_nacelle, nacelle_band)
+                render_nacelle_badge(wtg, avg_nacelle, nacelle_band)
 
-        fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
-        st.plotly_chart(fig, use_container_width=True)
+                fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
+                st.plotly_chart(fig, use_container_width=True)
