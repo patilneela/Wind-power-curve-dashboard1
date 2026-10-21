@@ -1,6 +1,6 @@
 from pathlib import Path
 import io
-
+import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -37,26 +37,73 @@ def ensure_required_columns(df: pd.DataFrame, required: list[str], label: str) -
         raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
 
 
-def generate_comment(perf):
+def get_status_and_comment(perf):
     if perf is None or pd.isna(perf):
-        return "Performance not available"
+        return "NA", "Performance not available"
 
     perf = round(perf, 2)
 
     if perf < 28:
-        return f"Performance: {perf}% → Extreme issue (Data unreliable)"
+        return "Extreme Issue", f"Performance: {perf}% → Extreme issue (Data unreliable)"
     elif perf < 92:
-        return f"Performance: {perf}% → Severe underperformance (Blade/Dust/Yaw issue)"
+        return "Severe Underperformance", f"Performance: {perf}% → Severe underperformance (Blade/Dust/Yaw issue)"
     elif perf < 98:
-        return f"Performance: {perf}% → Underperformance"
+        return "Underperformance", f"Performance: {perf}% → Underperformance"
     elif perf > 172:
-        return f"Performance: {perf}% → Abnormal high (Sensor/Data issue)"
+        return "Abnormal High", f"Performance: {perf}% → Abnormal high (Sensor/Data issue)"
     elif perf > 108:
-        return f"Performance: {perf}% → High overperformance"
+        return "High Overperformance", f"Performance: {perf}% → High overperformance"
     elif perf > 102:
-        return f"Performance: {perf}% → Slight overperformance"
+        return "Slight Overperformance", f"Performance: {perf}% → Slight overperformance"
     else:
-        return f"Performance: {perf}% → Normal performance"
+        return "Normal", f"Performance: {perf}% → Normal performance"
+
+
+def get_status_color(status: str) -> str:
+    color_map = {
+        "Extreme Issue": "#8B0000",
+        "Severe Underperformance": "#E53935",
+        "Underperformance": "#FB8C00",
+        "Normal": "#43A047",
+        "Slight Overperformance": "#1E88E5",
+        "High Overperformance": "#3949AB",
+        "Abnormal High": "#6A1B9A",
+        "NA": "#9E9E9E",
+    }
+    return color_map.get(status, "#FFFFFF")
+
+
+def style_wtg_summary(df: pd.DataFrame):
+    def style_status(val):
+        color = get_status_color(val)
+        return f"background-color: {color}; color: white; font-weight: bold;"
+
+    def style_performance(val):
+        if pd.isna(val):
+            return ""
+        status, _ = get_status_and_comment(val)
+        color = get_status_color(status)
+        return f"background-color: {color}; color: white;"
+
+    styled = df.style.format(
+        {
+            "MeanWindSpeed_mps": "{:.2f}",
+            "MeanActualPower_kW": "{:.2f}",
+            "MeanReferencePower_kW": "{:.2f}",
+            "MeanDeviation_kW": "{:.2f}",
+            "MeanSampleDeviation_pct": "{:.2f}",
+            "AggregateDeviation_pct": "{:.2f}",
+            "Performance_pct": "{:.2f}",
+        }
+    )
+
+    if "Status" in df.columns:
+        styled = styled.map(style_status, subset=["Status"])
+
+    if "Performance_pct" in df.columns:
+        styled = styled.map(style_performance, subset=["Performance_pct"])
+
+    return styled
 
 
 @st.cache_data(show_spinner=False)
@@ -234,8 +281,29 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         np.nan,
     )
 
-    wtg_summary["PerformanceComment"] = wtg_summary["MeanPerformance_pct"].apply(generate_comment)
-    wtg_summary = wtg_summary.sort_values("MeanPerformance_pct")
+    status_comment = wtg_summary["MeanPerformance_pct"].apply(get_status_and_comment)
+    wtg_summary["Status"] = status_comment.apply(lambda x: x[0])
+    wtg_summary["PerformanceComment"] = status_comment.apply(lambda x: x[1])
+
+    wtg_summary["Performance_pct"] = wtg_summary["MeanPerformance_pct"].round(2)
+
+    wtg_summary = wtg_summary[
+        [
+            "WTG",
+            "ValidSamples",
+            "Performance_pct",
+            "Status",
+            "PerformanceComment",
+            "MeanWindSpeed_mps",
+            "MeanActualPower_kW",
+            "MeanReferencePower_kW",
+            "MeanDeviation_kW",
+            "MeanSampleDeviation_pct",
+            "AggregateDeviation_pct",
+            "FirstTimestamp",
+            "LastTimestamp",
+        ]
+    ].sort_values("Performance_pct")
 
     return {
         "filtered": filtered,
@@ -379,7 +447,7 @@ st.subheader("Filter Summary")
 st.dataframe(results["filter_counts"], use_container_width=True, hide_index=True)
 
 st.subheader("WTG Summary")
-st.dataframe(results["wtg_summary"], use_container_width=True, hide_index=True)
+st.table(style_wtg_summary(results["wtg_summary"]))
 
 all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
 
