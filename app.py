@@ -1,6 +1,6 @@
 from pathlib import Path
 import io
-import os
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -35,6 +35,28 @@ def ensure_required_columns(df: pd.DataFrame, required: list[str], label: str) -
     missing = [col for col in required if col not in df.columns]
     if missing:
         raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
+
+
+def generate_comment(perf):
+    if perf is None or pd.isna(perf):
+        return "Performance not available"
+
+    perf = round(perf, 2)
+
+    if perf < 28:
+        return f"Performance: {perf}% → Extreme issue (Data unreliable)"
+    elif perf < 92:
+        return f"Performance: {perf}% → Severe underperformance (Blade/Dust/Yaw issue)"
+    elif perf < 98:
+        return f"Performance: {perf}% → Underperformance"
+    elif perf > 172:
+        return f"Performance: {perf}% → Abnormal high (Sensor/Data issue)"
+    elif perf > 108:
+        return f"Performance: {perf}% → High overperformance"
+    elif perf > 102:
+        return f"Performance: {perf}% → Slight overperformance"
+    else:
+        return f"Performance: {perf}% → Normal performance"
 
 
 @st.cache_data(show_spinner=False)
@@ -158,11 +180,19 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
     )
     filtered["Deviation_kW"] = filtered["ActualPower_kW"] - filtered["ReferencePower_kW"]
     filtered["Shortfall_kW"] = -filtered["Deviation_kW"]
+
     filtered["Deviation_pct"] = np.where(
         filtered["ReferencePower_kW"] > 0,
         100 * filtered["Deviation_kW"] / filtered["ReferencePower_kW"],
         np.nan,
     )
+
+    filtered["Performance_pct"] = np.where(
+        filtered["ReferencePower_kW"] > 0,
+        100 * filtered["ActualPower_kW"] / filtered["ReferencePower_kW"],
+        np.nan,
+    )
+
     filtered["WindSpeedBin_mps"] = np.floor(filtered["WindSpeed_mps"] / BIN_WIDTH) * BIN_WIDTH
 
     wtg_bins = (
@@ -175,6 +205,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
             MeanDeviation_kW=("Deviation_kW", "mean"),
             MeanShortfall_kW=("Shortfall_kW", "mean"),
             MeanDeviation_pct=("Deviation_pct", "mean"),
+            MeanPerformance_pct=("Performance_pct", "mean"),
             PowerStdDev_kW=("ActualPower_kW", "std"),
         )
         .reset_index()
@@ -189,6 +220,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
             MeanReferencePower_kW=("ReferencePower_kW", "mean"),
             MeanDeviation_kW=("Deviation_kW", "mean"),
             MeanSampleDeviation_pct=("Deviation_pct", "mean"),
+            MeanPerformance_pct=("Performance_pct", "mean"),
             FirstTimestamp=("DateTime", "min"),
             LastTimestamp=("DateTime", "max"),
         )
@@ -201,7 +233,9 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         / wtg_summary["MeanReferencePower_kW"],
         np.nan,
     )
-    wtg_summary = wtg_summary.sort_values("AggregateDeviation_pct")
+
+    wtg_summary["PerformanceComment"] = wtg_summary["MeanPerformance_pct"].apply(generate_comment)
+    wtg_summary = wtg_summary.sort_values("MeanPerformance_pct")
 
     return {
         "filtered": filtered,
