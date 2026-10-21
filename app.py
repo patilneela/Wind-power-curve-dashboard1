@@ -16,7 +16,7 @@ WIND_SPEED_COL = "WindSpeedAve"
 WIND_STD_COL = "WindSpeedStd"
 PITCH_STD_COL = "BladePitchStd"
 POWER_COL = "ActivePWAve"
-NACELLE_COL = "NacellePosition"   # change this if your real CSV column name is different
+NACELLE_COL = "NacellePositionStd"   
 BIN_WIDTH = 0.5
 
 REQUIRED_SCADA_COLUMNS = [
@@ -145,7 +145,7 @@ def style_nacelle_summary(df: pd.DataFrame):
     styled = df.style.format(
         {
             "MeanWindSpeed_mps": "{:.2f}",
-            "MeanNacellePosition": "{:.2f}",
+            "MeanNacellePositionStd": "{:.2f}",
         }
     )
 
@@ -317,7 +317,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         POWER_COL: "ActualPower_kW",
     }
     if NACELLE_COL in filtered.columns:
-        rename_map[NACELLE_COL] = "NacellePosition"
+        rename_map[NACELLE_COL] = "NacellePositionStd"
 
     filtered = filtered.rename(columns=rename_map)
 
@@ -438,15 +438,15 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "has_nacelle": "NacellePosition" in filtered.columns,
     }
 
-    if "NacellePosition" in filtered.columns:
-        nacelle_filtered = filtered.dropna(subset=["NacellePosition"]).copy()
+    if "NacellePositionStd" in filtered.columns:
+        nacelle_filtered = filtered.dropna(subset=["NacellePositionStd"]).copy()
 
         nacelle_bins = (
             nacelle_filtered.groupby(["WTG", "WindSpeedBin_mps"])
             .agg(
                 Samples=("NacellePosition", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-                MeanNacellePosition=("NacellePosition", "mean"),
+                MeanNacellePositionStd=("NacellePositionStd", "mean"),
             )
             .reset_index()
         )
@@ -454,28 +454,28 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         nacelle_summary = (
             nacelle_filtered.groupby("WTG")
             .agg(
-                ValidSamples=("NacellePosition", "size"),
+                ValidSamples=("NacellePositionStd", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-                MeanNacellePosition=("NacellePosition", "mean"),
+                MeanNacellePositionStd=("NacellePositionStd", "mean"),
                 FirstTimestamp=("DateTime", "min"),
                 LastTimestamp=("DateTime", "max"),
             )
             .reset_index()
         )
 
-        nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePosition"].apply(get_nacelle_band)
+        nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePositionStd"].apply(get_nacelle_band)
 
         nacelle_summary = nacelle_summary[
             [
                 "WTG",
                 "ValidSamples",
                 "MeanWindSpeed_mps",
-                "MeanNacellePosition",
+                "MeanNacellePositionStd",
                 "NacelleBand",
                 "FirstTimestamp",
                 "LastTimestamp",
             ]
-        ].sort_values("MeanNacellePosition")
+        ].sort_values("MeanNacellePositionStd")
 
         results["nacelle_bins"] = nacelle_bins
         results["nacelle_summary"] = nacelle_summary
@@ -542,7 +542,7 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
     fig.add_trace(
         go.Scattergl(
             x=filtered_wtg["WindSpeed_mps"],
-            y=filtered_wtg["NacellePosition"],
+            y=filtered_wtg["NacellePositionStd"],
             mode="markers",
             name=f"{wtg_name} Nacelle Position",
             marker=dict(size=5, opacity=0.18, color="#1f77b4"),
@@ -554,7 +554,7 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
         fig.add_trace(
             go.Scatter(
                 x=nacelle_bins["MeanWindSpeed_mps"],
-                y=nacelle_bins["MeanNacellePosition"],
+                y=nacelle_bins["MeanNacellePositionStd"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=3, color="#2ca02c"),
