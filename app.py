@@ -1,11 +1,30 @@
 from pathlib import Path
 import io
 from datetime import date, timedelta
-import os
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+try:
+    import kaleido  # noqa: F401
+    KALEIDO_AVAILABLE = True
+    KALEIDO_IMPORT_ERROR = ""
+except Exception as exc:
+    KALEIDO_AVAILABLE = False
+    KALEIDO_IMPORT_ERROR = str(exc)
+
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+    REPORTLAB_IMPORT_ERROR = ""
+except Exception as exc:
+    REPORTLAB_AVAILABLE = False
+    REPORTLAB_IMPORT_ERROR = str(exc)
 
 st.set_page_config(page_title="Power Curve Analytic Report", layout="wide")
 
@@ -102,6 +121,11 @@ def get_nacelle_band_color(band: str) -> str:
         "NA": "#9E9E9E",
     }
     return color_map.get(band, "#9E9E9E")
+
+
+def hex_to_reportlab_color(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    return colors.HexColor(f"#{hex_color}")
 
 
 def style_wtg_summary(df: pd.DataFrame):
@@ -222,6 +246,144 @@ def get_last_month_range(today_value: date) -> tuple[date, date]:
     last_day_last_month = first_day_this_month - timedelta(days=1)
     first_day_last_month = last_day_last_month.replace(day=1)
     return first_day_last_month, last_day_last_month
+
+
+def draw_pdf_header(pdf, width, height, title, site_name, date_text):
+    if LOGO_PATH.exists():
+        pdf.drawImage(str(LOGO_PATH), 30, height - 70, width=120, height=35, preserveAspectRatio=True, mask="auto")
+
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawString(170, height - 40, title)
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(170, height - 58, f"Site Name: {site_name}")
+    pdf.drawString(170, height - 72, f"Date Range: {date_text}")
+
+
+def draw_badge_pdf(pdf, x, y, width, height, fill_color_hex, title_text, line1, line2=None, text_color_hex="#FFFFFF"):
+    fill_color = hex_to_reportlab_color(fill_color_hex)
+    text_color = hex_to_reportlab_color(text_color_hex)
+
+    pdf.setFillColor(fill_color)
+    pdf.roundRect(x, y, width, height, 10, fill=1, stroke=0)
+
+    pdf.setFillColor(text_color)
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(x + 12, y + height - 18, title_text)
+
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(x + 12, y + height - 34, line1[:120])
+
+    if line2:
+        pdf.drawString(x + 12, y + height - 48, line2[:120])
+
+
+def build_power_curve_pdf(site_name: str, date_text: str, results: dict) -> bytes:
+    if not (KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE):
+        raise RuntimeError("PDF export needs both kaleido and reportlab installed.")
+
+    pdf_buffer = io.BytesIO()
+    pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
+    width, height = landscape(A4)
+
+    summary_lookup = results["wtg_summary"].set_index("WTG")
+    all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+
+    for wtg in all_wtgs:
+        filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+        wtg_bins = results["wtg_bins"][results["wtg_bins"]["WTG"] == wtg].copy()
+        if filtered_wtg.empty:
+            continue
+
+        perf = summary_lookup.loc[wtg, "Performance_pct"] if wtg in summary_lookup.index else np.nan
+        dev = summary_lookup.loc[wtg, "AggregateDeviation_pct"] if wtg in summary_lookup.index else np.nan
+        comment = summary_lookup.loc[wtg, "PerformanceComment"] if wtg in summary_lookup.index else "Performance comment not available"
+        status = summary_lookup.loc[wtg, "Status"] if wtg in summary_lookup.index else "NA"
+        badge_color = get_status_color(status)
+
+        fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
+        img_bytes = fig.to_image(format="png", width=1200, height=700, scale=1)
+        img_reader = ImageReader(io.BytesIO(img_bytes))
+
+        pdf.showPage()
+        draw_pdf_header(pdf, width, height, "Power Curve Analytic Report", site_name, date_text)
+
+        perf_text = "NA" if pd.isna(perf) else f"{perf:.2f}%"
+        dev_text = "NA" if pd.isna(dev) else f"{dev:.2f}%"
+
+        draw_badge_pdf(
+            pdf,
+            x=30,
+            y=height - 155,
+            width=width - 60,
+            height=60,
+            fill_color_hex=badge_color,
+            title_text=wtg,
+            line1=f"Performance: {perf_text} | Deviation: {dev_text}",
+            line2=f"Comment: {comment}",
+        )
+
+        pdf.drawImage(img_reader, 30, 40, width=width - 60, height=height - 230, preserveAspectRatio=True, mask="auto")
+
+    pdf.save()
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
+def build_nacelle_pdf(site_name: str, date_text: str, results: dict) -> bytes:
+    if not (KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE):
+        raise RuntimeError("PDF export needs both kaleido and reportlab installed.")
+
+    if results["nacelle_summary"].empty:
+        raise RuntimeError("No nacelle data available for PDF export.")
+
+    pdf_buffer = io.BytesIO()
+    pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
+    width, height = landscape(A4)
+
+    nacelle_lookup = results["nacelle_summary"].set_index("WTG")
+    all_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
+
+    for wtg in all_wtgs:
+        filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+        filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionAve"]).copy()
+        filtered_wtg["NacelleBand"] = filtered_wtg["NacellePositionAve"].apply(get_nacelle_band)
+        nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
+
+        if filtered_wtg.empty:
+            continue
+
+        avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
+        band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
+        badge_color = get_nacelle_band_color(band)
+        text_color = "#000000" if band == "60-120" else "#FFFFFF"
+
+        fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
+        img_bytes = fig.to_image(format="png", width=1200, height=700, scale=1)
+        img_reader = ImageReader(io.BytesIO(img_bytes))
+
+        pdf.showPage()
+        draw_pdf_header(pdf, width, height, "Nacelle Position Report", site_name, date_text)
+
+        avg_text = "NA" if pd.isna(avg_nacelle) else f"{avg_nacelle:.2f}°"
+
+        draw_badge_pdf(
+            pdf,
+            x=30,
+            y=height - 155,
+            width=width - 60,
+            height=60,
+            fill_color_hex=badge_color,
+            title_text=wtg,
+            line1=f"Avg Nacelle Position: {avg_text}",
+            line2=f"Band: {band}",
+            text_color_hex=text_color,
+        )
+
+        pdf.drawImage(img_reader, 30, 40, width=width - 60, height=height - 230, preserveAspectRatio=True, mask="auto")
+
+    pdf.save()
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
 
 
 @st.cache_data(show_spinner=False)
@@ -555,11 +717,7 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
             y=filtered_wtg["WindSpeed_mps"],
             mode="markers",
             name=f"{wtg_name} Scatter",
-            marker=dict(
-                size=6,
-                opacity=0.45,
-                color=band_colors,
-            ),
+            marker=dict(size=6, opacity=0.45, color=band_colors),
             text=hover_text,
             hovertemplate="Nacelle Position: %{x:.2f}°<br>Wind Speed: %{y:.2f} m/s<br>%{text}<extra></extra>",
         )
@@ -690,6 +848,56 @@ c1, c2, c3 = st.columns(3)
 c1.metric("Rows passing filters", f"{results['rows_passing']:,}")
 c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
+
+st.subheader("PDF Downloads")
+pdf_col1, pdf_col2 = st.columns(2)
+
+with pdf_col1:
+    if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
+        if st.button("Prepare Power Curve PDF"):
+            with st.spinner("Generating Power Curve PDF..."):
+                try:
+                    st.session_state["power_pdf_bytes"] = build_power_curve_pdf(site_name, date_text, results)
+                    st.success("Power Curve PDF is ready.")
+                except Exception as exc:
+                    st.error(f"Power curve PDF could not be generated: {exc}")
+
+        if "power_pdf_bytes" in st.session_state:
+            st.download_button(
+                "Download Power Curve PDF",
+                data=st.session_state["power_pdf_bytes"],
+                file_name="power_curve_report.pdf",
+                mime="application/pdf",
+            )
+    else:
+        st.info(
+            f"Power curve PDF export requires kaleido and reportlab. "
+            f"Kaleido: {KALEIDO_IMPORT_ERROR or 'OK'} | Reportlab: {REPORTLAB_IMPORT_ERROR or 'OK'}"
+        )
+
+with pdf_col2:
+    if results["has_nacelle"]:
+        if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
+            if st.button("Prepare Nacelle PDF"):
+                with st.spinner("Generating Nacelle PDF..."):
+                    try:
+                        st.session_state["nacelle_pdf_bytes"] = build_nacelle_pdf(site_name, date_text, results)
+                        st.success("Nacelle PDF is ready.")
+                    except Exception as exc:
+                        st.error(f"Nacelle PDF could not be generated: {exc}")
+
+            if "nacelle_pdf_bytes" in st.session_state:
+                st.download_button(
+                    "Download Nacelle PDF",
+                    data=st.session_state["nacelle_pdf_bytes"],
+                    file_name="nacelle_report.pdf",
+                    mime="application/pdf",
+                )
+        else:
+            st.info(
+                f"Nacelle PDF export requires kaleido and reportlab. "
+                f"Kaleido: {KALEIDO_IMPORT_ERROR or 'OK'} | Reportlab: {REPORTLAB_IMPORT_ERROR or 'OK'}"
+            )
 
 if results["has_nacelle"]:
     tab1, tab2 = st.tabs(["Power Curve", "Nacelle Position vs Wind Speed"])
