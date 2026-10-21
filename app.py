@@ -16,6 +16,7 @@ WIND_SPEED_COL = "WindSpeedAve"
 WIND_STD_COL = "WindSpeedStd"
 PITCH_STD_COL = "BladePitchStd"
 POWER_COL = "ActivePWAve"
+NACELLE_STD_COL = "NacellePositionStd"
 BIN_WIDTH = 0.5
 
 REQUIRED_SCADA_COLUMNS = [
@@ -45,19 +46,19 @@ def get_status_and_comment(perf):
     perf = round(perf, 2)
 
     if perf < 28:
-        return "Extreme Issue", f"Extreme issue (Data unreliable)"
+        return "Extreme Issue", "Extreme issue (Data unreliable)"
     elif perf < 92:
-        return "Severe Underperformance", f"Severe underperformance (Blade/Dust/Yaw issue)"
+        return "Severe Underperformance", "Severe underperformance (Blade/Dust/Yaw issue)"
     elif perf < 98:
-        return "Underperformance", f"Underperformance"
+        return "Underperformance", "Underperformance"
     elif perf > 172:
-        return "Abnormal High", f"Abnormal high (Sensor/Data issue)"
+        return "Abnormal High", "Abnormal high (Sensor/Data issue)"
     elif perf > 108:
-        return "High Overperformance", f"High overperformance"
+        return "High Overperformance", "High overperformance"
     elif perf > 102:
-        return "Slight Overperformance", f"Slight overperformance"
+        return "Slight Overperformance", "Slight overperformance"
     else:
-        return "Normal", f"Normal performance"
+        return "Normal", "Normal performance"
 
 
 def get_status_color(status: str) -> str:
@@ -72,6 +73,33 @@ def get_status_color(status: str) -> str:
         "NA": "#9E9E9E",
     }
     return color_map.get(status, "#9E9E9E")
+
+
+def get_nacelle_std_band(avg_std):
+    if avg_std is None or pd.isna(avg_std):
+        return "NA"
+    if avg_std < 2:
+        return "0-2"
+    elif avg_std < 5:
+        return "2-5"
+    elif avg_std < 10:
+        return "5-10"
+    elif avg_std < 20:
+        return "10-20"
+    else:
+        return "20+"
+
+
+def get_nacelle_std_color(band: str) -> str:
+    color_map = {
+        "0-2": "#43A047",
+        "2-5": "#1E88E5",
+        "5-10": "#FB8C00",
+        "10-20": "#E53935",
+        "20+": "#8B0000",
+        "NA": "#9E9E9E",
+    }
+    return color_map.get(band, "#9E9E9E")
 
 
 def style_wtg_summary(df: pd.DataFrame):
@@ -103,6 +131,24 @@ def style_wtg_summary(df: pd.DataFrame):
 
     if "Performance_pct" in df.columns:
         styled = styled.map(style_performance, subset=["Performance_pct"])
+
+    return styled
+
+
+def style_nacelle_summary(df: pd.DataFrame):
+    def style_band(val):
+        color = get_nacelle_std_color(val)
+        return f"background-color: {color}; color: white; font-weight: bold;"
+
+    styled = df.style.format(
+        {
+            "MeanWindSpeed_mps": "{:.2f}",
+            "MeanNacelleStd": "{:.2f}",
+        }
+    )
+
+    if "NacelleStdBand" in df.columns:
+        styled = styled.map(style_band, subset=["NacelleStdBand"])
 
     return styled
 
@@ -139,6 +185,34 @@ def render_status_badge(wtg: str, perf: float, dev: float, comment: str):
     )
 
 
+def render_nacelle_badge(wtg: str, avg_std: float, band: str):
+    color = get_nacelle_std_color(band)
+    std_text = "NA" if pd.isna(avg_std) else f"{avg_std:.2f}"
+
+    st.markdown(
+        f"""
+        <div style="
+            background-color:{color};
+            color:white;
+            padding:14px 18px;
+            border-radius:12px;
+            margin:8px 0 14px 0;
+            font-weight:600;
+            box-shadow:0 2px 8px rgba(0,0,0,0.12);
+        ">
+            <div style="font-size:20px; margin-bottom:6px;">{wtg}</div>
+            <div style="font-size:16px; margin-bottom:4px;">
+                Avg Nacelle Position Std: {std_text}
+            </div>
+            <div style="font-size:14px; line-height:1.5;">
+                Band: {band}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def get_last_month_range(today_value: date) -> tuple[date, date]:
     first_day_this_month = today_value.replace(day=1)
     last_day_last_month = first_day_this_month - timedelta(days=1)
@@ -154,7 +228,11 @@ def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
     ensure_required_columns(df, REQUIRED_SCADA_COLUMNS, "SCADA file")
 
-    for col in [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]:
+    numeric_cols = [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]
+    if NACELLE_STD_COL in df.columns:
+        numeric_cols.append(NACELLE_STD_COL)
+
+    for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce", dayfirst=True)
@@ -230,14 +308,16 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         columns=["Filter Stage", "Record Count"],
     )
 
-    filtered = filtered.rename(
-        columns={
-            WTG_COL: "WTG",
-            TIME_COL: "DateTime",
-            WIND_SPEED_COL: "WindSpeed_mps",
-            POWER_COL: "ActualPower_kW",
-        }
-    )
+    rename_map = {
+        WTG_COL: "WTG",
+        TIME_COL: "DateTime",
+        WIND_SPEED_COL: "WindSpeed_mps",
+        POWER_COL: "ActualPower_kW",
+    }
+    if NACELLE_STD_COL in filtered.columns:
+        rename_map[NACELLE_STD_COL] = "NacellePositionStd"
+
+    filtered = filtered.rename(columns=rename_map)
 
     ref_working = ref.copy()
     for col in ["ReferenceWindSpeed_mps", "ReferencePower_kW"]:
@@ -344,7 +424,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         ]
     ].sort_values("Performance_pct")
 
-    return {
+    results = {
         "filtered": filtered,
         "filter_counts": filter_counts,
         "wtg_bins": wtg_bins,
@@ -353,15 +433,58 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "rows_passing": int(mask.sum()),
         "rows_compared": len(filtered),
         "wtg_count": int(filtered["WTG"].nunique()),
+        "has_nacelle_std": "NacellePositionStd" in filtered.columns,
     }
 
+    if "NacellePositionStd" in filtered.columns:
+        nacelle_filtered = filtered.dropna(subset=["NacellePositionStd"]).copy()
 
-def make_wtg_power_curve_plotly(
-    ref: pd.DataFrame,
-    filtered_wtg: pd.DataFrame,
-    wtg_bins: pd.DataFrame,
-    wtg_name: str,
-):
+        nacelle_bins = (
+            nacelle_filtered.groupby(["WTG", "WindSpeedBin_mps"])
+            .agg(
+                Samples=("NacellePositionStd", "size"),
+                MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+                MeanNacelleStd=("NacellePositionStd", "mean"),
+            )
+            .reset_index()
+        )
+
+        nacelle_summary = (
+            nacelle_filtered.groupby("WTG")
+            .agg(
+                ValidSamples=("NacellePositionStd", "size"),
+                MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
+                MeanNacelleStd=("NacellePositionStd", "mean"),
+                FirstTimestamp=("DateTime", "min"),
+                LastTimestamp=("DateTime", "max"),
+            )
+            .reset_index()
+        )
+
+        nacelle_summary["NacelleStdBand"] = nacelle_summary["MeanNacelleStd"].apply(get_nacelle_std_band)
+
+        nacelle_summary = nacelle_summary[
+            [
+                "WTG",
+                "ValidSamples",
+                "MeanWindSpeed_mps",
+                "MeanNacelleStd",
+                "NacelleStdBand",
+                "FirstTimestamp",
+                "LastTimestamp",
+            ]
+        ].sort_values("MeanNacelleStd")
+
+        results["nacelle_bins"] = nacelle_bins
+        results["nacelle_summary"] = nacelle_summary
+    else:
+        results["nacelle_bins"] = pd.DataFrame()
+        results["nacelle_summary"] = pd.DataFrame()
+
+    return results
+
+
+def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
     fig.add_trace(
@@ -400,6 +523,48 @@ def make_wtg_power_curve_plotly(
         title=f"{wtg_name} Power Curve",
         xaxis_title="Wind Speed (m/s)",
         yaxis_title="Active Power (kW)",
+        height=480,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=40, r=40, t=70, b=40),
+        legend=dict(orientation="h", y=1.02, x=0),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+    return fig
+
+
+def make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg_name):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scattergl(
+            x=filtered_wtg["WindSpeed_mps"],
+            y=filtered_wtg["NacellePositionStd"],
+            mode="markers",
+            name=f"{wtg_name} Nacelle Position Std",
+            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
+            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Nacelle Position Std: %{y:.2f}<extra></extra>",
+        )
+    )
+
+    if not nacelle_bins.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=nacelle_bins["MeanWindSpeed_mps"],
+                y=nacelle_bins["MeanNacelleStd"],
+                mode="lines+markers",
+                name=f"{wtg_name} mean by bin",
+                line=dict(width=3, color="#2ca02c"),
+                marker=dict(size=6, color="#2ca02c"),
+                hovertemplate="Mean Wind: %{x:.2f} m/s<br>Mean Nacelle Position Std: %{y:.2f}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        title=f"{wtg_name} Wind Speed vs Nacelle Position Std",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Nacelle Position Std",
         height=480,
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -451,18 +616,14 @@ if not valid_time.empty:
     if date_filter_type == "Today":
         start_date = today_value
         end_date = today_value
-
     elif date_filter_type == "Last 7 Days":
         start_date = today_value - timedelta(days=6)
         end_date = today_value
-
     elif date_filter_type == "This Month":
         start_date = today_value.replace(day=1)
         end_date = today_value
-
     elif date_filter_type == "Last Month":
         start_date, end_date = get_last_month_range(today_value)
-
     else:
         manual_range = st.sidebar.date_input(
             "Date range",
@@ -513,39 +674,68 @@ c1.metric("Rows passing filters", f"{results['rows_passing']:,}")
 c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
-st.subheader("Filter Summary")
-st.dataframe(results["filter_counts"], use_container_width=True, hide_index=True)
-
-st.subheader("WTG Summary")
-st.table(style_wtg_summary(results["wtg_summary"]))
-
-all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
-
-if not all_wtgs:
-    st.warning("No turbine data available after filtering.")
-    st.stop()
-
-st.subheader(f"All Turbine Graphs ({len(all_wtgs)})")
-
-summary_lookup = results["wtg_summary"].set_index("WTG")
-
-for wtg in all_wtgs:
-    filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
-    wtg_bins = results["wtg_bins"][results["wtg_bins"]["WTG"] == wtg].copy()
-
-    if filtered_wtg.empty:
-        continue
-
-    perf = summary_lookup.loc[wtg, "Performance_pct"] if wtg in summary_lookup.index else np.nan
-    dev = summary_lookup.loc[wtg, "AggregateDeviation_pct"] if wtg in summary_lookup.index else np.nan
-    comment = summary_lookup.loc[wtg, "PerformanceComment"] if wtg in summary_lookup.index else "Performance comment not available"
-
-    render_status_badge(wtg, perf, dev, comment)
-
-    fig = make_wtg_power_curve_plotly(
-        results["ref"],
-        filtered_wtg,
-        wtg_bins,
-        wtg,
+if results["has_nacelle_std"]:
+    tab1, tab2 = st.tabs(["Power Curve", "Wind Speed vs Nacelle Position Std"])
+else:
+    tab1 = st.container()
+    tab2 = None
+    st.warning(
+        f"Nacelle std tab is hidden because column '{NACELLE_STD_COL}' was not found in the uploaded SCADA file."
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+with tab1:
+    st.subheader("Filter Summary")
+    st.dataframe(results["filter_counts"], use_container_width=True, hide_index=True)
+
+    st.subheader("WTG Summary")
+    st.table(style_wtg_summary(results["wtg_summary"]))
+
+    all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+    summary_lookup = results["wtg_summary"].set_index("WTG")
+
+    st.subheader(f"All Turbine Power Curves ({len(all_wtgs)})")
+
+    for wtg in all_wtgs:
+        filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+        wtg_bins = results["wtg_bins"][results["wtg_bins"]["WTG"] == wtg].copy()
+
+        if filtered_wtg.empty:
+            continue
+
+        perf = summary_lookup.loc[wtg, "Performance_pct"] if wtg in summary_lookup.index else np.nan
+        dev = summary_lookup.loc[wtg, "AggregateDeviation_pct"] if wtg in summary_lookup.index else np.nan
+        comment = summary_lookup.loc[wtg, "PerformanceComment"] if wtg in summary_lookup.index else "Performance comment not available"
+
+        render_status_badge(wtg, perf, dev, comment)
+
+        fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
+        st.plotly_chart(fig, use_container_width=True)
+
+if tab2 is not None:
+    with tab2:
+        if results["nacelle_summary"].empty:
+            st.warning("Nacelle position std data is not available after filtering.")
+        else:
+            st.subheader("Nacelle Position Std Summary")
+            st.table(style_nacelle_summary(results["nacelle_summary"]))
+
+            all_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
+            nacelle_lookup = results["nacelle_summary"].set_index("WTG")
+
+            st.subheader(f"All Turbine Nacelle Position Std Curves ({len(all_wtgs)})")
+
+            for wtg in all_wtgs:
+                filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+                filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionStd"]).copy()
+                nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
+
+                if filtered_wtg.empty:
+                    continue
+
+                avg_std = nacelle_lookup.loc[wtg, "MeanNacelleStd"] if wtg in nacelle_lookup.index else np.nan
+                nacelle_band = nacelle_lookup.loc[wtg, "NacelleStdBand"] if wtg in nacelle_lookup.index else "NA"
+
+                render_nacelle_badge(wtg, avg_std, nacelle_band)
+
+                fig = make_nacelle_std_plotly(filtered_wtg, nacelle_bins, wtg)
+                st.plotly_chart(fig, use_container_width=True)
