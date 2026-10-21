@@ -1,4 +1,3 @@
-from pathlib import Path
 import io
 
 import numpy as np
@@ -194,8 +193,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 
     wtg_summary["AggregateDeviation_pct"] = np.where(
         wtg_summary["MeanReferencePower_kW"] > 0,
-        100
-        * (wtg_summary["MeanActualPower_kW"] - wtg_summary["MeanReferencePower_kW"])
+        100 * (wtg_summary["MeanActualPower_kW"] - wtg_summary["MeanReferencePower_kW"])
         / wtg_summary["MeanReferencePower_kW"],
         np.nan,
     )
@@ -227,8 +225,7 @@ def make_wtg_power_curve_plotly(
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
             name=f"{wtg_name} SCADA",
-            marker=dict(size=6, opacity=0.20, color="#1f77b4"),
-            hovertemplate="Wind Speed: %{x:.2f} m/s<br>Actual Power: %{y:.2f} kW<extra></extra>",
+            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
         )
     )
 
@@ -250,7 +247,7 @@ def make_wtg_power_curve_plotly(
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=3, color="#2ca02c"),
-                marker=dict(size=7),
+                marker=dict(size=6),
             )
         )
 
@@ -258,10 +255,9 @@ def make_wtg_power_curve_plotly(
         title=f"{wtg_name} Power Curve",
         xaxis_title="Wind Speed (m/s)",
         yaxis_title="Active Power (kW)",
-        height=500,
+        height=480,
         plot_bgcolor="white",
         paper_bgcolor="white",
-        hovermode="closest",
         margin=dict(l=40, r=40, t=70, b=40),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
@@ -270,7 +266,7 @@ def make_wtg_power_curve_plotly(
 
 
 st.title("Power Curve Dashboard")
-st.write("Upload SCADA CSV and Reference Excel to view all turbine power curves after filtering.")
+st.write("Upload SCADA CSV and reference Excel file to see all turbine graphs after filtering.")
 
 st.sidebar.header("Upload Files")
 uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
@@ -294,8 +290,8 @@ except Exception as exc:
 curve_names = sorted(reference_curves.keys())
 selected_curve = st.sidebar.selectbox("Select reference curve", curve_names)
 
-valid_time = scada[TIME_COL].dropna()
 scada_filtered = scada.copy()
+valid_time = scada[TIME_COL].dropna()
 
 if not valid_time.empty:
     min_date = valid_time.min().date()
@@ -308,7 +304,7 @@ if not valid_time.empty:
         max_value=max_date,
     )
 
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
         start_date, end_date = date_range
         scada_filtered = scada_filtered[
             scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
@@ -335,13 +331,13 @@ st.dataframe(results["filter_counts"], use_container_width=True, hide_index=True
 st.subheader("WTG Summary")
 st.dataframe(results["wtg_summary"], use_container_width=True, hide_index=True)
 
-st.subheader("All Turbine Graphs")
-
 all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
 
 if not all_wtgs:
     st.warning("No turbine data available after filtering.")
     st.stop()
+
+st.subheader(f"All Turbine Graphs ({len(all_wtgs)})")
 
 for wtg in all_wtgs:
     filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
@@ -350,10 +346,6 @@ for wtg in all_wtgs:
     if filtered_wtg.empty:
         continue
 
-    fig = make_wtg_power_curve_plotly(
-        results["ref"],
-        filtered_wtg,
-        wtg_bins,
-        wtg,
-    )
+    st.markdown(f"### {wtg}")
+    fig = make_wtg_power_curve_plotly(results["ref"], filtered_wtg, wtg_bins, wtg)
     st.plotly_chart(fig, use_container_width=True)
