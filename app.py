@@ -1,3 +1,4 @@
+from pathlib import Path
 import io
 
 import numpy as np
@@ -5,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Power Curve Dashboard", layout="wide")
+st.set_page_config(page_title="Power Curve Analytic Report", layout="wide")
 
 WTG_COL = "Name"
 TIME_COL = "Time"
@@ -25,6 +26,9 @@ REQUIRED_SCADA_COLUMNS = [
     PITCH_STD_COL,
     POWER_COL,
 ]
+
+BASE_DIR = Path(__file__).resolve().parent
+LOGO_PATH = BASE_DIR / "Envision.png"
 
 
 def ensure_required_columns(df: pd.DataFrame, required: list[str], label: str) -> None:
@@ -265,9 +269,6 @@ def make_wtg_power_curve_plotly(
     return fig
 
 
-st.title("Power Curve Dashboard")
-st.write("Upload SCADA CSV and reference Excel file to see all turbine graphs after filtering.")
-
 st.sidebar.header("Upload Files")
 uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
 uploaded_ref = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"])
@@ -292,6 +293,7 @@ selected_curve = st.sidebar.selectbox("Select reference curve", curve_names)
 
 scada_filtered = scada.copy()
 valid_time = scada[TIME_COL].dropna()
+date_text = "All available dates"
 
 if not valid_time.empty:
     min_date = valid_time.min().date()
@@ -309,6 +311,20 @@ if not valid_time.empty:
         scada_filtered = scada_filtered[
             scada_filtered[TIME_COL].dt.date.between(start_date, end_date)
         ].copy()
+        date_text = f"{start_date} to {end_date}"
+
+site_name = selected_curve
+
+header_left, header_right = st.columns([1, 4])
+
+with header_left:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=180)
+
+with header_right:
+    st.title("Power Curve Analytic Report")
+    st.markdown(f"**Site Name:** {site_name}")
+    st.markdown(f"**Date Range:** {date_text}")
 
 if scada_filtered.empty:
     st.warning("No SCADA data available after date filtering.")
