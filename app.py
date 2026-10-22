@@ -663,7 +663,7 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             name=f"{wtg_name} SCADA",
             marker=dict(
                 size=7,
-                opacity=0.85,
+                opacity=0.65,
                 color="rgba(173, 216, 255, 0.85)",
                 line=dict(color="#0B3D91", width=1.2),
             ),
@@ -687,8 +687,12 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
                 y=wtg_bins["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=4, color="#1B8E1B"),
-                marker=dict(size=8, color="#1B8E1B"),
+                line=dict(width=6, color="#00A651"),
+                marker=dict(
+                    size=10,
+                    color="#00A651",
+                    line=dict(color="white", width=1.5),
+                ),
             )
         )
 
