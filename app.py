@@ -662,9 +662,10 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             mode="markers",
             name=f"{wtg_name} SCADA",
             marker=dict(
-                size=6,
-                opacity=0.38,
-                color="#0B5CAD",
+                size=7,
+                opacity=0.85,
+                color="rgba(173, 216, 255, 0.85)",
+                line=dict(color="#0B3D91", width=1.2),
             ),
         )
     )
@@ -686,8 +687,8 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
                 y=wtg_bins["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=3, color="#2ca02c"),
-                marker=dict(size=6, color="#2ca02c"),
+                line=dict(width=4, color="#1B8E1B"),
+                marker=dict(size=8, color="#1B8E1B"),
             )
         )
 
@@ -722,9 +723,10 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
             mode="markers",
             name=f"{wtg_name} Scatter",
             marker=dict(
-                size=7,
-                opacity=0.70,
+                size=8,
+                opacity=0.90,
                 color=band_colors,
+                line=dict(color="#0B3D91", width=1.0),
             ),
             text=hover_text,
             hovertemplate="Nacelle Position: %{x:.2f}°<br>Wind Speed: %{y:.2f} m/s<br>%{text}<extra></extra>",
@@ -738,8 +740,8 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
                 y=nacelle_bins["MeanWindSpeed_mps"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=3, color="#2ca02c"),
-                marker=dict(size=7, color="#2ca02c"),
+                line=dict(width=4, color="#1B8E1B"),
+                marker=dict(size=8, color="#1B8E1B"),
                 hovertemplate="Mean Nacelle Position: %{x:.2f}°<br>Mean Wind Speed: %{y:.2f} m/s<extra></extra>",
             )
         )
