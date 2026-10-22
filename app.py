@@ -974,4 +974,3 @@ if tab2 is not None:
 
                 fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
-can u just tell what part i have to change not code whole high code repeated or just tell what to replace which line to which line with old and new code.
