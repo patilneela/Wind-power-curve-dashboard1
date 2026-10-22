@@ -661,7 +661,11 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
             name=f"{wtg_name} SCADA",
-            marker=dict(size=5, opacity=0.18, color="#1f77b4"),
+            marker=dict(
+                size=6,
+                opacity=0.38,
+                color="#0B5CAD",
+            ),
         )
     )
 
@@ -717,7 +721,11 @@ def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
             y=filtered_wtg["WindSpeed_mps"],
             mode="markers",
             name=f"{wtg_name} Scatter",
-            marker=dict(size=6, opacity=0.45, color=band_colors),
+            marker=dict(
+                size=7,
+                opacity=0.70,
+                color=band_colors,
+            ),
             text=hover_text,
             hovertemplate="Nacelle Position: %{x:.2f}°<br>Wind Speed: %{y:.2f} m/s<br>%{text}<extra></extra>",
         )
@@ -966,3 +974,4 @@ if tab2 is not None:
 
                 fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
+can u just tell what part i have to change not code whole high code repeated or just tell what to replace which line to which line with old and new code.
