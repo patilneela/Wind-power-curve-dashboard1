@@ -655,13 +655,13 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    # 1. Scatter first
+    # 1. Scatter points first
     fig.add_trace(
         go.Scattergl(
             x=filtered_wtg["WindSpeed_mps"],
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
-            name=f"{wtg_name} SCADA",
+            name="Power Samples",
             marker=dict(
                 size=7,
                 opacity=0.28,
@@ -671,30 +671,31 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         )
     )
 
-    # 2. Reference line second
+    # 2. Reference line second - thin red
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
             y=ref["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
-            line=dict(width=5, color="#d62728"),
+            line=dict(
+                width=2,
+                color="red",
+            ),
         )
     )
 
-    # 3. Mean-by-bin line last so it stays visible on top
+    # 3. Mean by bin line third - thin green
     if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
                 x=wtg_bins["MeanWindSpeed_mps"],
                 y=wtg_bins["MeanActualPower_kW"],
-                mode="lines+markers",
+                mode="lines",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=7, color="#00A651"),
-                marker=dict(
-                    size=11,
-                    color="#00A651",
-                    line=dict(color="white", width=2),
+                line=dict(
+                    width=2,
+                    color="green",
                 ),
             )
         )
@@ -983,4 +984,3 @@ if tab2 is not None:
 
                 fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
-                
