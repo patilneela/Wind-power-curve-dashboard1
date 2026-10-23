@@ -664,25 +664,25 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             name=f"{wtg_name} SCADA",
             marker=dict(
                 size=7,
-                opacity=0.45,
-                color="rgba(173, 216, 255, 0.85)",
-                line=dict(color="#0B3D91", width=1.2),
+                opacity=0.28,
+                color="rgba(173, 216, 255, 0.75)",
+                line=dict(color="#0B3D91", width=1.0),
             ),
         )
     )
 
-    # 2. Red reference line second
+    # 2. Reference line second
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
             y=ref["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
-            line=dict(width=3, color="#d62728"),
+            line=dict(width=5, color="#d62728"),
         )
     )
 
-    # 3. Green mean-by-bin line last
+    # 3. Mean-by-bin line last so it stays visible on top
     if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -690,9 +690,9 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
                 y=wtg_bins["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=8, color="#00A651"),
+                line=dict(width=7, color="#00A651"),
                 marker=dict(
-                    size=12,
+                    size=11,
                     color="#00A651",
                     line=dict(color="white", width=2),
                 ),
@@ -983,3 +983,4 @@ if tab2 is not None:
 
                 fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
+                
