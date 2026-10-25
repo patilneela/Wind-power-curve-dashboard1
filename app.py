@@ -655,9 +655,9 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    # 1. Scatter points first
+    # 1. Draw power sample scatter points first (SVG trace keeps layer order consistent).
     fig.add_trace(
-        go.Scattergl(
+        go.Scatter(
             x=filtered_wtg["WindSpeed_mps"],
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
@@ -671,21 +671,18 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         )
     )
 
-    # 2. Reference line second - thin red
+    # 2. Draw the reference curve over the scatter points.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
             y=ref["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
-            line=dict(
-                width=2,
-                color="red",
-            ),
+            line=dict(width=2, color="red"),
         )
     )
 
-    # 3. Mean by bin line third - thin green
+    # 3. Draw the mean-by-bin line on top of both previous traces.
     if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -693,10 +690,7 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
                 y=wtg_bins["MeanActualPower_kW"],
                 mode="lines",
                 name=f"{wtg_name} mean by bin",
-                line=dict(
-                    width=2,
-                    color="green",
-                ),
+                line=dict(width=2, color="green"),
             )
         )
 
