@@ -36,6 +36,7 @@ WIND_STD_COL = "WindSpeedStd"
 PITCH_STD_COL = "BladePitchStd"
 POWER_COL = "ActivePWAve"
 NACELLE_COL = "NacellePositionAve"
+NACELLE_STD_COL = "NacellePositionStd"
 BIN_WIDTH = 0.5
 
 REQUIRED_SCADA_COLUMNS = [
@@ -357,7 +358,7 @@ def build_nacelle_pdf(site_name: str, date_text: str, results: dict) -> bytes:
         badge_color = get_nacelle_band_color(band)
         text_color = "#000000" if band == "60-120" else "#FFFFFF"
 
-        fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
+        fig = make_nacelle_plotly(results["ref"], filtered_wtg, nacelle_bins, wtg)
         img_bytes = fig.to_image(format="png", width=1200, height=700, scale=1)
         img_reader = ImageReader(io.BytesIO(img_bytes))
 
@@ -397,6 +398,8 @@ def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     numeric_cols = [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]
     if NACELLE_COL in df.columns:
         numeric_cols.append(NACELLE_COL)
+    if NACELLE_STD_COL in df.columns:
+        numeric_cols.append(NACELLE_STD_COL)
 
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -482,6 +485,8 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
     }
     if NACELLE_COL in filtered.columns:
         rename_map[NACELLE_COL] = "NacellePositionAve"
+    if NACELLE_STD_COL in filtered.columns:
+        rename_map[NACELLE_STD_COL] = "NacellePositionStd"
 
     filtered = filtered.rename(columns=rename_map)
 
@@ -602,6 +607,8 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "has_nacelle": "NacellePositionAve" in filtered.columns,
     }
 
+    # Tab 2 data is prepared separately. This does not change the Tab 1 power-curve
+    # calculations, filters, bins, summaries, or graph.
     if "NacellePositionAve" in filtered.columns:
         nacelle_filtered = filtered.dropna(subset=["NacellePositionAve"]).copy()
         nacelle_filtered["NacelleBand"] = nacelle_filtered["NacellePositionAve"].apply(get_nacelle_band)
@@ -609,18 +616,17 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         nacelle_bins = (
             nacelle_filtered.groupby(["WTG", "WindSpeedBin_mps"])
             .agg(
-                Samples=("NacellePositionAve", "size"),
+                Samples=("ActualPower_kW", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
-                MeanNacellePosition=("NacellePositionAve", "mean"),
+                MeanActualPower_kW=("ActualPower_kW", "mean"),
             )
             .reset_index()
         )
-        nacelle_bins["NacelleBand"] = nacelle_bins["MeanNacellePosition"].apply(get_nacelle_band)
 
         nacelle_summary = (
             nacelle_filtered.groupby("WTG")
             .agg(
-                ValidSamples=("NacellePositionAve", "size"),
+                ValidSamples=("ActualPower_kW", "size"),
                 MeanWindSpeed_mps=("WindSpeed_mps", "mean"),
                 MeanNacellePosition=("NacellePositionAve", "mean"),
                 FirstTimestamp=("DateTime", "min"),
@@ -628,9 +634,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
             )
             .reset_index()
         )
-
         nacelle_summary["NacelleBand"] = nacelle_summary["MeanNacellePosition"].apply(get_nacelle_band)
-
         nacelle_summary = nacelle_summary[
             [
                 "WTG",
@@ -645,9 +649,11 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 
         results["nacelle_bins"] = nacelle_bins
         results["nacelle_summary"] = nacelle_summary
+        results["has_nacelle_std"] = "NacellePositionStd" in filtered.columns
     else:
         results["nacelle_bins"] = pd.DataFrame()
         results["nacelle_summary"] = pd.DataFrame()
+        results["has_nacelle_std"] = False
 
     return results
 
@@ -709,56 +715,89 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     return fig
 
 
-def make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg_name):
-    band_colors = filtered_wtg["NacelleBand"].map(get_nacelle_band_color)
-    hover_text = (
-        "Band: " + filtered_wtg["NacelleBand"].astype(str)
-        + "<br>Wind Speed: " + filtered_wtg["WindSpeed_mps"].round(2).astype(str) + " m/s"
-    )
-
+def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
+    """
+    Tab 2 power-curve-style graph:
+    X = wind speed, Y = active power, scatter colour = NacellePositionStd.
+    The continuous colour scale reflects the actual std values without inventing
+    threshold categories. Reference and mean-by-bin lines are drawn over the samples.
+    """
     fig = go.Figure()
 
+    if "NacellePositionStd" in filtered_wtg.columns:
+        plot_df = filtered_wtg.dropna(
+            subset=["WindSpeed_mps", "ActualPower_kW", "NacellePositionStd"]
+        ).copy()
+    else:
+        plot_df = pd.DataFrame()
+
+    if not plot_df.empty:
+        fig.add_trace(
+            go.Scattergl(
+                x=plot_df["WindSpeed_mps"],
+                y=plot_df["ActualPower_kW"],
+                mode="markers",
+                name="Samples (colour = Nacelle Position Std)",
+                marker=dict(
+                    size=4,
+                    opacity=0.75,
+                    color=plot_df["NacellePositionStd"],
+                    colorscale=[
+                        [0.0, "#2E7D32"],
+                        [0.5, "#FDD835"],
+                        [1.0, "#E53935"],
+                    ],
+                    showscale=True,
+                    colorbar=dict(title="Nacelle<br>Position Std"),
+                    line=dict(width=0),
+                ),
+                customdata=plot_df[["NacellePositionStd", "NacellePositionAve"]]
+                if "NacellePositionAve" in plot_df.columns
+                else plot_df[["NacellePositionStd"]],
+                hovertemplate=(
+                    "Wind Speed: %{x:.2f} m/s"
+                    "<br>Active Power: %{y:.2f} kW"
+                    "<br>Nacelle Position Std: %{marker.color:.3f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    # Draw reference line over the scatter points, as in Tab 1.
     fig.add_trace(
-        go.Scattergl(
-            x=filtered_wtg["NacellePositionAve"],
-            y=filtered_wtg["WindSpeed_mps"],
-            mode="markers",
-            name=f"{wtg_name} Scatter",
-            marker=dict(
-                size=8,
-                opacity=0.90,
-                color=band_colors,
-                line=dict(color="#0B3D91", width=1.0),
-            ),
-            text=hover_text,
-            hovertemplate="Nacelle Position: %{x:.2f}°<br>Wind Speed: %{y:.2f} m/s<br>%{text}<extra></extra>",
+        go.Scatter(
+            x=ref["ReferenceWindSpeed_mps"],
+            y=ref["ReferencePower_kW"],
+            mode="lines",
+            name="Reference Curve",
+            line=dict(width=2, color="red"),
         )
     )
 
+    # Draw the mean active-power-by-wind-speed-bin line over the samples.
     if not nacelle_bins.empty:
         fig.add_trace(
             go.Scatter(
-                x=nacelle_bins["MeanNacellePosition"],
-                y=nacelle_bins["MeanWindSpeed_mps"],
+                x=nacelle_bins["MeanWindSpeed_mps"],
+                y=nacelle_bins["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
-                line=dict(width=4, color="#1B8E1B"),
-                marker=dict(size=8, color="#1B8E1B"),
-                hovertemplate="Mean Nacelle Position: %{x:.2f}°<br>Mean Wind Speed: %{y:.2f} m/s<extra></extra>",
+                line=dict(width=2, color="green"),
+                marker=dict(size=5, color="green"),
             )
         )
 
     fig.update_layout(
-        title=f"{wtg_name} Nacelle Position vs Wind Speed",
-        xaxis_title="Nacelle Position Ave (°)",
-        yaxis_title="Wind Speed (m/s)",
+        title=f"{wtg_name} Nacelle Std Coloured Power Curve",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Active Power (kW)",
         height=480,
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5", range=[0, 360])
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
@@ -976,5 +1015,5 @@ if tab2 is not None:
 
                 render_nacelle_badge(wtg, avg_nacelle, nacelle_band)
 
-                fig = make_nacelle_plotly(filtered_wtg, nacelle_bins, wtg)
+                fig = make_nacelle_plotly(results["ref"], filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
