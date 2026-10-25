@@ -716,11 +716,10 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
 
 
 def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
-    """
-    Tab 2 power-curve-style graph:
-    X = wind speed, Y = active power, scatter colour = NacellePositionStd.
-    The continuous colour scale reflects the actual std values without inventing
-    threshold categories. Reference and mean-by-bin lines are drawn over the samples.
+    """Tab 2 power-curve-style graph with nacelle-std-coloured samples.
+
+    Trace order is intentional: scatter samples first, then reference curve,
+    then mean-by-wind-bin line, so both lines render over the scatter points.
     """
     fig = go.Figure()
 
@@ -731,9 +730,15 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
     else:
         plot_df = pd.DataFrame()
 
+    # 1. Plot all scatter samples first. Use go.Scatter (SVG) to preserve
+    # consistent trace layering with the reference and mean-bin lines.
     if not plot_df.empty:
+        custom_columns = ["NacellePositionStd"]
+        if "NacellePositionAve" in plot_df.columns:
+            custom_columns.append("NacellePositionAve")
+
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=plot_df["WindSpeed_mps"],
                 y=plot_df["ActualPower_kW"],
                 mode="markers",
@@ -751,9 +756,7 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
                     colorbar=dict(title="Nacelle<br>Position Std"),
                     line=dict(width=0),
                 ),
-                customdata=plot_df[["NacellePositionStd", "NacellePositionAve"]]
-                if "NacellePositionAve" in plot_df.columns
-                else plot_df[["NacellePositionStd"]],
+                customdata=plot_df[custom_columns],
                 hovertemplate=(
                     "Wind Speed: %{x:.2f} m/s"
                     "<br>Active Power: %{y:.2f} kW"
@@ -763,7 +766,7 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
             )
         )
 
-    # Draw reference line over the scatter points, as in Tab 1.
+    # 2. Draw the reference curve on top of the scatter samples.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -774,7 +777,7 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
         )
     )
 
-    # Draw the mean active-power-by-wind-speed-bin line over the samples.
+    # 3. Draw the mean active-power-by-wind-speed-bin line last, on top.
     if not nacelle_bins.empty:
         fig.add_trace(
             go.Scatter(
