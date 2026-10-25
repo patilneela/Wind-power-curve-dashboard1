@@ -805,6 +805,92 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
     return fig
 
 
+def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs, show_scatter=False):
+    """Combined power-curve comparison for selected turbines in Tab 3.
+
+    Scatter samples are optional and are hidden by default. When enabled,
+    they are drawn first, followed by the reference and mean-bin lines.
+    """
+    fig = go.Figure()
+    palette = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
+        "#e377c2", "#17becf", "#bcbd22", "#d62728", "#7f7f7f",
+        "#003f5c", "#ffa600", "#665191", "#a05195", "#d45087",
+    ]
+
+    # Optional scatter samples are added first so the reference and mean-bin
+    # lines are rendered over them. Scatters are OFF by default.
+    if show_scatter:
+        for i, wtg in enumerate(selected_wtgs):
+            turbine_df = filtered[filtered["WTG"] == wtg]
+            if turbine_df.empty:
+                continue
+            color = palette[i % len(palette)]
+            fig.add_trace(
+                go.Scatter(
+                    x=turbine_df["WindSpeed_mps"],
+                    y=turbine_df["ActualPower_kW"],
+                    mode="markers",
+                    name=f"{wtg} samples",
+                    legendgroup=str(wtg),
+                    marker=dict(size=4, opacity=0.5, color=color),
+                    hovertemplate=(
+                        f"Turbine: {wtg}<br>Wind Speed: %{{x:.2f}} m/s"
+                        "<br>Active Power: %{y:.2f} kW<extra></extra>"
+                    ),
+                )
+            )
+
+    # Reference curve appears over any optional scatter samples.
+    fig.add_trace(
+        go.Scatter(
+            x=ref["ReferenceWindSpeed_mps"],
+            y=ref["ReferencePower_kW"],
+            mode="lines",
+            name="Reference Curve",
+            line=dict(width=2.5, color="red"),
+            legendgroup="reference",
+        )
+    )
+
+    # Mean-by-wind-bin lines are drawn last and labelled with turbine names.
+    for i, wtg in enumerate(selected_wtgs):
+        turbine_bins = wtg_bins[wtg_bins["WTG"] == wtg]
+        if turbine_bins.empty:
+            continue
+        color = palette[i % len(palette)]
+        fig.add_trace(
+            go.Scatter(
+                x=turbine_bins["MeanWindSpeed_mps"],
+                y=turbine_bins["MeanActualPower_kW"],
+                mode="lines+markers",
+                name=f"{wtg} mean by bin",
+                legendgroup=str(wtg),
+                line=dict(width=2.5, color=color),
+                marker=dict(size=5, color=color),
+                hovertemplate=(
+                    f"Turbine: {wtg}<br>Mean Wind Speed: %{{x:.2f}} m/s"
+                    "<br>Mean Active Power: %{y:.2f} kW<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title="Multi-Turbine Power Curve Comparison",
+        xaxis_title="Wind Speed (m/s)",
+        yaxis_title="Active Power (kW)",
+        height=650,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=45, r=45, t=90, b=45),
+        legend=dict(orientation="h", y=-0.2, x=0),
+        hovermode="closest",
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
+    return fig
+
+
 st.sidebar.header("Upload Files")
 uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
 uploaded_ref = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"])
@@ -954,9 +1040,13 @@ with pdf_col2:
             )
 
 if results["has_nacelle"]:
-    tab1, tab2 = st.tabs(["Power Curve", "Nacelle Position vs Wind Speed"])
+    tab1, tab2, tab3 = st.tabs([
+        "Power Curve",
+        "Nacelle Position vs Wind Speed",
+        "Multi-Turbine Comparison",
+    ])
 else:
-    tab1 = st.container()
+    tab1, tab3 = st.tabs(["Power Curve", "Multi-Turbine Comparison"])
     tab2 = None
     st.warning(
         f"Nacelle tab is hidden because column '{NACELLE_COL}' was not found in the uploaded SCADA file."
@@ -1020,3 +1110,42 @@ if tab2 is not None:
 
                 fig = make_nacelle_plotly(results["ref"], filtered_wtg, nacelle_bins, wtg)
                 st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    st.subheader("Compare Multiple Turbines")
+    comparison_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+    if not comparison_wtgs:
+        st.warning("No turbines are available for comparison after filtering.")
+    else:
+        default_selection = comparison_wtgs[:min(3, len(comparison_wtgs))]
+        selected_wtgs = st.multiselect(
+            "Select turbine names to compare",
+            options=comparison_wtgs,
+            default=default_selection,
+            help="Select turbines to compare their power curves on one graph.",
+            key="multi_turbine_comparison_selection",
+        )
+        if not selected_wtgs:
+            st.info("Select at least one turbine to display the comparison graph.")
+        else:
+            show_comparison_scatter = st.checkbox(
+                "Show scatter points",
+                value=False,
+                help="Turn this on to display individual SCADA samples for each selected turbine.",
+                key="multi_turbine_show_scatter",
+            )
+            comparison_filtered = results["filtered"][
+                results["filtered"]["WTG"].isin(selected_wtgs)
+            ].copy()
+            comparison_bins = results["wtg_bins"][
+                results["wtg_bins"]["WTG"].isin(selected_wtgs)
+            ].copy()
+            comparison_fig = make_multi_turbine_comparison_plotly(
+                results["ref"], comparison_filtered, comparison_bins, selected_wtgs,
+                show_scatter=show_comparison_scatter,
+            )
+            st.plotly_chart(comparison_fig, use_container_width=True)
+            st.caption(
+                "Each turbine has its own colour and name in the legend. The red line is the "
+                "reference curve. Enable 'Show scatter points' whenever you want to see individual samples."
+            )
