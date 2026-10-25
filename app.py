@@ -663,10 +663,10 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=7,
-                opacity=0.28,
-                color="rgba(173, 216, 255, 0.75)",
-                line=dict(color="#0B3D91", width=1.0),
+                size=4,
+                opacity=0.45,
+                color="rgba(45, 115, 200, 0.55)",
+                line=dict(color="rgba(25, 85, 160, 0.65)", width=0.5),
             ),
         )
     )
