@@ -659,16 +659,20 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
+    filtered_wtg_plot = filtered_wtg[filtered_wtg["WindSpeed_mps"] <= 15].copy()
+    wtg_bins_plot = wtg_bins[wtg_bins["MeanWindSpeed_mps"] <= 15].copy()
+    ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
+
     fig.add_trace(
         go.Scattergl(
-            x=filtered_wtg["WindSpeed_mps"],
-            y=filtered_wtg["ActualPower_kW"],
+            x=filtered_wtg_plot["WindSpeed_mps"],
+            y=filtered_wtg_plot["ActualPower_kW"],
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=6,
-                opacity=0.65,
-                color="#123c7a",
+                size=5,
+                opacity=0.8,
+                color="blue",
                 symbol="circle",
                 line=dict(width=0),
             ),
@@ -677,19 +681,19 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
 
     fig.add_trace(
         go.Scatter(
-            x=ref["ReferenceWindSpeed_mps"],
-            y=ref["ReferencePower_kW"],
+            x=ref_plot["ReferenceWindSpeed_mps"],
+            y=ref_plot["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
             line=dict(width=2, color="red"),
         )
     )
 
-    if not wtg_bins.empty:
+    if not wtg_bins_plot.empty:
         fig.add_trace(
             go.Scatter(
-                x=wtg_bins["MeanWindSpeed_mps"],
-                y=wtg_bins["MeanActualPower_kW"],
+                x=wtg_bins_plot["MeanWindSpeed_mps"],
+                y=wtg_bins_plot["MeanActualPower_kW"],
                 mode="lines",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=2, color="green"),
@@ -706,7 +710,11 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#e5e5e5",
+        range=[0, 15],
+    )
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
