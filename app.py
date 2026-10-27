@@ -607,8 +607,6 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "has_nacelle": "NacellePositionAve" in filtered.columns,
     }
 
-    # Tab 2 data is prepared separately. This does not change the Tab 1 power-curve
-    # calculations, filters, bins, summaries, or graph.
     if "NacellePositionAve" in filtered.columns:
         nacelle_filtered = filtered.dropna(subset=["NacellePositionAve"]).copy()
         nacelle_filtered["NacelleBand"] = nacelle_filtered["NacellePositionAve"].apply(get_nacelle_band)
@@ -661,23 +659,22 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    # 1. Draw power sample scatter points first (SVG trace keeps layer order consistent).
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=filtered_wtg["WindSpeed_mps"],
             y=filtered_wtg["ActualPower_kW"],
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=4,
-                opacity=0.45,
-                color="rgba(45, 115, 200, 0.55)",
-                line=dict(color="rgba(25, 85, 160, 0.65)", width=0.5),
+                size=6,
+                opacity=0.65,
+                color="#123c7a",
+                symbol="circle",
+                line=dict(width=0),
             ),
         )
     )
 
-    # 2. Draw the reference curve over the scatter points.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -688,7 +685,6 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         )
     )
 
-    # 3. Draw the mean-by-bin line on top of both previous traces.
     if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -730,8 +726,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
     else:
         plot_df = pd.DataFrame()
 
-    # 1. Plot all scatter samples first. Use go.Scatter (SVG) to preserve
-    # consistent trace layering with the reference and mean-bin lines.
     if not plot_df.empty:
         custom_columns = ["NacellePositionStd"]
         if "NacellePositionAve" in plot_df.columns:
@@ -766,7 +760,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
             )
         )
 
-    # 2. Draw the reference curve on top of the scatter samples.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -777,7 +770,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
         )
     )
 
-    # 3. Draw the mean active-power-by-wind-speed-bin line last, on top.
     if not nacelle_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -806,11 +798,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
 
 
 def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs, show_scatter=False):
-    """Combined power-curve comparison for selected turbines in Tab 3.
-
-    Scatter samples are optional and are hidden by default. When enabled,
-    they are drawn first, followed by the reference and mean-bin lines.
-    """
     fig = go.Figure()
     palette = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
@@ -818,8 +805,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         "#003f5c", "#ffa600", "#665191", "#a05195", "#d45087",
     ]
 
-    # Optional scatter samples are added first so the reference and mean-bin
-    # lines are rendered over them. Scatters are OFF by default.
     if show_scatter:
         for i, wtg in enumerate(selected_wtgs):
             turbine_df = filtered[filtered["WTG"] == wtg]
@@ -841,7 +826,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
                 )
             )
 
-    # Reference curve appears over any optional scatter samples.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -853,7 +837,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         )
     )
 
-    # Mean-by-wind-bin lines are drawn last and labelled with turbine names.
     for i, wtg in enumerate(selected_wtgs):
         turbine_bins = wtg_bins[wtg_bins["WTG"] == wtg]
         if turbine_bins.empty:
