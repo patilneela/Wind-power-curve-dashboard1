@@ -607,8 +607,6 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "has_nacelle": "NacellePositionAve" in filtered.columns,
     }
 
-    # Tab 2 data is prepared separately. This does not change the Tab 1 power-curve
-    # calculations, filters, bins, summaries, or graph.
     if "NacellePositionAve" in filtered.columns:
         nacelle_filtered = filtered.dropna(subset=["NacellePositionAve"]).copy()
         nacelle_filtered["NacelleBand"] = nacelle_filtered["NacellePositionAve"].apply(get_nacelle_band)
@@ -661,39 +659,40 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    # 1. Draw power sample scatter points first (SVG trace keeps layer order consistent).
+    filtered_wtg_plot = filtered_wtg[filtered_wtg["WindSpeed_mps"] <= 15].copy()
+    wtg_bins_plot = wtg_bins[wtg_bins["MeanWindSpeed_mps"] <= 15].copy()
+    ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
+
     fig.add_trace(
         go.Scatter(
-            x=filtered_wtg["WindSpeed_mps"],
-            y=filtered_wtg["ActualPower_kW"],
+            x=filtered_wtg_plot["WindSpeed_mps"],
+            y=filtered_wtg_plot["ActualPower_kW"],
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=4,
-                opacity=0.45,
-                color="rgba(45, 115, 200, 0.55)",
-                line=dict(color="rgba(25, 85, 160, 0.65)", width=0.5),
+                size=5,
+                opacity=0.55,
+                color="#0B3D91",
+                line=dict(width=0),
             ),
         )
     )
 
-    # 2. Draw the reference curve over the scatter points.
     fig.add_trace(
         go.Scatter(
-            x=ref["ReferenceWindSpeed_mps"],
-            y=ref["ReferencePower_kW"],
+            x=ref_plot["ReferenceWindSpeed_mps"],
+            y=ref_plot["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
             line=dict(width=2, color="red"),
         )
     )
 
-    # 3. Draw the mean-by-bin line on top of both previous traces.
-    if not wtg_bins.empty:
+    if not wtg_bins_plot.empty:
         fig.add_trace(
             go.Scatter(
-                x=wtg_bins["MeanWindSpeed_mps"],
-                y=wtg_bins["MeanActualPower_kW"],
+                x=wtg_bins_plot["MeanWindSpeed_mps"],
+                y=wtg_bins_plot["MeanActualPower_kW"],
                 mode="lines",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=2, color="green"),
@@ -710,17 +709,16 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#e5e5e5",
+        range=[0, 15],
+    )
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
 
 def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
-    """Tab 2 power-curve-style graph with nacelle-std-coloured samples.
-
-    Trace order is intentional: scatter samples first, then reference curve,
-    then mean-by-wind-bin line, so both lines render over the scatter points.
-    """
     fig = go.Figure()
 
     if "NacellePositionStd" in filtered_wtg.columns:
@@ -730,8 +728,10 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
     else:
         plot_df = pd.DataFrame()
 
-    # 1. Plot all scatter samples first. Use go.Scatter (SVG) to preserve
-    # consistent trace layering with the reference and mean-bin lines.
+    plot_df = plot_df[plot_df["WindSpeed_mps"] <= 15].copy()
+    nacelle_bins_plot = nacelle_bins[nacelle_bins["MeanWindSpeed_mps"] <= 15].copy()
+    ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
+
     if not plot_df.empty:
         custom_columns = ["NacellePositionStd"]
         if "NacellePositionAve" in plot_df.columns:
@@ -766,23 +766,21 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
             )
         )
 
-    # 2. Draw the reference curve on top of the scatter samples.
     fig.add_trace(
         go.Scatter(
-            x=ref["ReferenceWindSpeed_mps"],
-            y=ref["ReferencePower_kW"],
+            x=ref_plot["ReferenceWindSpeed_mps"],
+            y=ref_plot["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
             line=dict(width=2, color="red"),
         )
     )
 
-    # 3. Draw the mean active-power-by-wind-speed-bin line last, on top.
-    if not nacelle_bins.empty:
+    if not nacelle_bins_plot.empty:
         fig.add_trace(
             go.Scatter(
-                x=nacelle_bins["MeanWindSpeed_mps"],
-                y=nacelle_bins["MeanActualPower_kW"],
+                x=nacelle_bins_plot["MeanWindSpeed_mps"],
+                y=nacelle_bins_plot["MeanActualPower_kW"],
                 mode="lines+markers",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=2, color="green"),
@@ -800,17 +798,16 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#e5e5e5",
+        range=[0, 15],
+    )
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
 
 def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs, show_scatter=False):
-    """Combined power-curve comparison for selected turbines in Tab 3.
-
-    Scatter samples are optional and are hidden by default. When enabled,
-    they are drawn first, followed by the reference and mean-bin lines.
-    """
     fig = go.Figure()
     palette = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
@@ -818,14 +815,15 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         "#003f5c", "#ffa600", "#665191", "#a05195", "#d45087",
     ]
 
-    # Optional scatter samples are added first so the reference and mean-bin
-    # lines are rendered over them. Scatters are OFF by default.
+    filtered_plot = filtered[filtered["WindSpeed_mps"] <= 15].copy()
+    wtg_bins_plot = wtg_bins[wtg_bins["MeanWindSpeed_mps"] <= 15].copy()
+    ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
+
     if show_scatter:
         for i, wtg in enumerate(selected_wtgs):
-            turbine_df = filtered[filtered["WTG"] == wtg]
+            turbine_df = filtered_plot[filtered_plot["WTG"] == wtg]
             if turbine_df.empty:
                 continue
-            color = palette[i % len(palette)]
             fig.add_trace(
                 go.Scatter(
                     x=turbine_df["WindSpeed_mps"],
@@ -833,7 +831,12 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
                     mode="markers",
                     name=f"{wtg} samples",
                     legendgroup=str(wtg),
-                    marker=dict(size=4, opacity=0.5, color=color),
+                    marker=dict(
+                        size=4,
+                        opacity=0.45,
+                        color="#0B3D91",
+                        line=dict(width=0),
+                    ),
                     hovertemplate=(
                         f"Turbine: {wtg}<br>Wind Speed: %{{x:.2f}} m/s"
                         "<br>Active Power: %{y:.2f} kW<extra></extra>"
@@ -841,21 +844,19 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
                 )
             )
 
-    # Reference curve appears over any optional scatter samples.
     fig.add_trace(
         go.Scatter(
-            x=ref["ReferenceWindSpeed_mps"],
-            y=ref["ReferencePower_kW"],
+            x=ref_plot["ReferenceWindSpeed_mps"],
+            y=ref_plot["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
-            line=dict(width=2.5, color="red"),
+            line=dict(width=2, color="red"),
             legendgroup="reference",
         )
     )
 
-    # Mean-by-wind-bin lines are drawn last and labelled with turbine names.
     for i, wtg in enumerate(selected_wtgs):
-        turbine_bins = wtg_bins[wtg_bins["WTG"] == wtg]
+        turbine_bins = wtg_bins_plot[wtg_bins_plot["WTG"] == wtg]
         if turbine_bins.empty:
             continue
         color = palette[i % len(palette)]
@@ -886,7 +887,11 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         legend=dict(orientation="h", y=-0.2, x=0),
         hovermode="closest",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#e5e5e5",
+        range=[0, 15],
+    )
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
