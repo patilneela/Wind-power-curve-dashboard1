@@ -664,15 +664,15 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
 
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=filtered_wtg_plot["WindSpeed_mps"],
             y=filtered_wtg_plot["ActualPower_kW"],
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=5,
-                opacity=0.55,
-                color="#0B3D91",
+                size=2,
+                opacity=1.0,
+                color="#003B8E",
                 line=dict(width=0),
             ),
         )
@@ -825,16 +825,16 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
             if turbine_df.empty:
                 continue
             fig.add_trace(
-                go.Scatter(
+                go.Scattergl(
                     x=turbine_df["WindSpeed_mps"],
                     y=turbine_df["ActualPower_kW"],
                     mode="markers",
                     name=f"{wtg} samples",
                     legendgroup=str(wtg),
                     marker=dict(
-                        size=4,
-                        opacity=0.45,
-                        color="#0B3D91",
+                        size=2,
+                        opacity=1.0,
+                        color="#003B8E",
                         line=dict(width=0),
                     ),
                     hovertemplate=(
@@ -1108,7 +1108,7 @@ if tab2 is not None:
                 if filtered_wtg.empty:
                     continue
 
-                avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
+                    avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
                 nacelle_band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
 
                 render_nacelle_badge(wtg, avg_nacelle, nacelle_band)
