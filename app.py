@@ -661,41 +661,39 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    filtered_wtg_plot = filtered_wtg[filtered_wtg["WindSpeed_mps"] <= 15].copy()
-    wtg_bins_plot = wtg_bins[wtg_bins["MeanWindSpeed_mps"] <= 15].copy()
-    ref_plot = ref[ref["ReferenceWindSpeed_mps"] <= 15].copy()
-
+    # 1. Draw power sample scatter points first (SVG trace keeps layer order consistent).
     fig.add_trace(
-        go.Scattergl(
-            x=filtered_wtg_plot["WindSpeed_mps"],
-            y=filtered_wtg_plot["ActualPower_kW"],
+        go.Scatter(
+            x=filtered_wtg["WindSpeed_mps"],
+            y=filtered_wtg["ActualPower_kW"],
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=5,
-                opacity=0.75,
-                color="#1f4e8c",
-                symbol="circle",
-                line=dict(width=0),
+                size=4,
+                opacity=0.45,
+                color="rgba(45, 115, 200, 0.55)",
+                line=dict(color="rgba(25, 85, 160, 0.65)", width=0.5),
             ),
         )
     )
 
+    # 2. Draw the reference curve over the scatter points.
     fig.add_trace(
         go.Scatter(
-            x=ref_plot["ReferenceWindSpeed_mps"],
-            y=ref_plot["ReferencePower_kW"],
+            x=ref["ReferenceWindSpeed_mps"],
+            y=ref["ReferencePower_kW"],
             mode="lines",
             name="Reference Curve",
             line=dict(width=2, color="red"),
         )
     )
 
-    if not wtg_bins_plot.empty:
+    # 3. Draw the mean-by-bin line on top of both previous traces.
+    if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
-                x=wtg_bins_plot["MeanWindSpeed_mps"],
-                y=wtg_bins_plot["MeanActualPower_kW"],
+                x=wtg_bins["MeanWindSpeed_mps"],
+                y=wtg_bins["MeanActualPower_kW"],
                 mode="lines",
                 name=f"{wtg_name} mean by bin",
                 line=dict(width=2, color="green"),
@@ -712,11 +710,7 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         margin=dict(l=40, r=40, t=70, b=40),
         legend=dict(orientation="h", y=1.02, x=0),
     )
-    fig.update_xaxes(
-        showgrid=True,
-        gridcolor="#e5e5e5",
-        range=[0, 15],
-    )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e5e5")
     fig.update_yaxes(showgrid=True, gridcolor="#e5e5e5")
     return fig
 
