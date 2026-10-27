@@ -527,7 +527,7 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 
     filtered["Performance_pct"] = np.where(
         filtered["ReferencePower_kW"] > 0,
-        100 * filtered["ActualPower_kW"] / filtered["ReferencePower_kW"],
+        100 * filtered["ActualPower_kW"] / filtered["ReferencePowerPower_kW"],
         np.nan,
     )
 
@@ -666,9 +666,10 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
             mode="markers",
             name="Power Samples",
             marker=dict(
-                size=2.5,
-                opacity=0.85,
-                color="#1f5aa6",
+                size=6,
+                opacity=0.65,
+                color="#123c7a",
+                symbol="circle",
                 line=dict(width=0),
             ),
         )
