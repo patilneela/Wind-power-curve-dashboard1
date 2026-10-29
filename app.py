@@ -1,6 +1,7 @@
 from pathlib import Path
 import io
-from datetime import date, timedelta
+import zipfile
+from datetime import date, timedelta, datetime
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,7 @@ POWER_COL = "ActivePWAve"
 NACELLE_COL = "NacellePositionAve"
 NACELLE_STD_COL = "NacellePositionStd"
 BIN_WIDTH = 0.5
+LOW_DATA_THRESHOLD = 30
 
 REQUIRED_SCADA_COLUMNS = [
     WTG_COL,
@@ -258,6 +260,7 @@ def draw_pdf_header(pdf, width, height, title, site_name, date_text):
     pdf.setFont("Helvetica", 10)
     pdf.drawString(170, height - 58, f"Site Name: {site_name}")
     pdf.drawString(170, height - 72, f"Date Range: {date_text}")
+    pdf.drawString(170, height - 86, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 def draw_badge_pdf(pdf, x, y, width, height, fill_color_hex, title_text, line1, line2=None, text_color_hex="#FFFFFF"):
@@ -269,16 +272,50 @@ def draw_badge_pdf(pdf, x, y, width, height, fill_color_hex, title_text, line1, 
 
     pdf.setFillColor(text_color)
     pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(x + 12, y + height - 18, title_text)
+    pdf.drawString(x + 12, y + height - 18, title_text[:90])
 
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(x + 12, y + height - 34, line1[:120])
+    pdf.drawString(x + 12, y + height - 34, line1[:140])
 
     if line2:
-        pdf.drawString(x + 12, y + height - 48, line2[:120])
+        pdf.drawString(x + 12, y + height - 48, line2[:140])
 
 
-def build_power_curve_pdf(site_name: str, date_text: str, results: dict) -> bytes:
+def draw_simple_table(pdf, x, y_top, col_widths, headers, rows, row_height=18, header_fill="#D9EAF7"):
+    page_width, page_height = landscape(A4)
+    y = y_top
+
+    pdf.setFillColor(hex_to_reportlab_color(header_fill))
+    pdf.rect(x, y - row_height, sum(col_widths), row_height, fill=1, stroke=1)
+
+    current_x = x
+    pdf.setFillColor(colors.black)
+    pdf.setFont("Helvetica-Bold", 9)
+    for header, width in zip(headers, col_widths):
+        pdf.drawString(current_x + 4, y - 12, str(header)[:28])
+        current_x += width
+
+    y -= row_height
+
+    pdf.setFont("Helvetica", 8)
+    for row in rows:
+        if y < 40:
+            pdf.showPage()
+            y = page_height - 40
+
+        current_x = x
+        pdf.setFillColor(colors.black)
+        for cell, width in zip(row, col_widths):
+            pdf.rect(current_x, y - row_height, width, row_height, fill=0, stroke=1)
+            text = "" if pd.isna(cell) else str(cell)
+            pdf.drawString(current_x + 4, y - 12, text[:28])
+            current_x += width
+        y -= row_height
+
+    return y
+
+
+def build_dashboard_pdf(site_name: str, date_text: str, results: dict) -> bytes:
     if not (KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE):
         raise RuntimeError("PDF export needs both kaleido and reportlab installed.")
 
@@ -286,7 +323,153 @@ def build_power_curve_pdf(site_name: str, date_text: str, results: dict) -> byte
     pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
     width, height = landscape(A4)
 
-    summary_lookup = results["wtg_summary"].set_index("WTG")
+    # Page 1: Executive summary
+    pdf.showPage()
+    draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
+
+    upload_summary = results["upload_summary"]
+    coverage_summary = results["turbine_coverage_summary"]
+
+    summary_lines = [
+        f"Uploaded files: {upload_summary['uploaded_file_count']}",
+        f"Valid SCADA files: {upload_summary['valid_file_count']}",
+        f"Invalid files: {upload_summary['invalid_file_count']}",
+        f"Rows uploaded: {upload_summary['total_rows_uploaded']:,}",
+        f"Rows passing filters: {results['rows_passing']:,}",
+        f"Rows compared: {results['rows_compared']:,}",
+        f"Uploaded turbines: {coverage_summary['uploaded_turbines']}",
+        f"Working turbines: {coverage_summary['working_turbines']}",
+        f"Missing turbines: {coverage_summary['missing_turbines']}",
+        f"Low-data turbines: {coverage_summary['low_data_turbines']}",
+    ]
+
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, height - 120, "Executive Summary")
+    pdf.setFont("Helvetica", 11)
+
+    y = height - 145
+    for line in summary_lines:
+        pdf.drawString(40, y, line)
+        y -= 18
+
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, y - 10, "Filter Summary")
+    y -= 25
+
+    filter_rows = results["filter_counts"].values.tolist()
+    y = draw_simple_table(
+        pdf,
+        x=30,
+        y_top=y,
+        col_widths=[350, 120],
+        headers=["Filter Stage", "Record Count"],
+        rows=filter_rows,
+        row_height=20,
+    )
+
+    # Page 2: File ingest summary
+    pdf.showPage()
+    draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, height - 120, "File Ingest Summary")
+
+    file_rows = results["file_ingest_summary"].copy()
+    if not file_rows.empty:
+        y = draw_simple_table(
+            pdf,
+            x=30,
+            y_top=height - 140,
+            col_widths=[240, 90, 80, 270],
+            headers=["File", "Status", "Rows", "Message"],
+            rows=file_rows[["FileName", "Status", "RowsLoaded", "Message"]].values.tolist(),
+            row_height=20,
+        )
+    else:
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(40, height - 145, "No file ingest summary available.")
+        y = height - 165
+
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, y - 10, "Turbine Coverage Summary")
+    y -= 28
+
+    coverage_rows = [[k.replace("_", " ").title(), v] for k, v in coverage_summary.items()]
+    y = draw_simple_table(
+        pdf,
+        x=30,
+        y_top=y,
+        col_widths=[260, 120],
+        headers=["Metric", "Value"],
+        rows=coverage_rows,
+        row_height=20,
+    )
+
+    # Page 3: Missing turbines
+    pdf.showPage()
+    draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, height - 120, "Missing Turbines")
+
+    missing_df = results["missing_turbines"]
+    if not missing_df.empty:
+        draw_simple_table(
+            pdf,
+            x=30,
+            y_top=height - 140,
+            col_widths=[140, 120, 130, 320],
+            headers=["WTG", "Uploaded Rows", "Date Range Rows", "Reason"],
+            rows=missing_df[["WTG", "UploadedRows", "RowsInDateRange", "Reason"]].values.tolist(),
+            row_height=20,
+        )
+    else:
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(40, height - 145, "No missing turbines.")
+
+    # Page 4: Low-data turbines
+    pdf.showPage()
+    draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, height - 120, "Low-Data Turbines")
+
+    low_df = results["low_data_turbines"]
+    if not low_df.empty:
+        draw_simple_table(
+            pdf,
+            x=30,
+            y_top=height - 140,
+            col_widths=[160, 140, 160, 260],
+            headers=["WTG", "Valid Samples", "Threshold", "Reason"],
+            rows=low_df[["WTG", "ValidSamples", "Threshold", "Reason"]].values.tolist(),
+            row_height=20,
+        )
+    else:
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(40, height - 145, "No low-data turbines.")
+
+    # Page 5: WTG summary
+    pdf.showPage()
+    draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(30, height - 120, "WTG Summary")
+
+    wtg_summary_pdf = results["wtg_summary"].copy()
+    if not wtg_summary_pdf.empty:
+        cols = ["WTG", "ValidSamples", "Performance_pct", "Status", "AggregateDeviation_pct"]
+        draw_simple_table(
+            pdf,
+            x=30,
+            y_top=height - 140,
+            col_widths=[140, 100, 110, 180, 130],
+            headers=cols,
+            rows=wtg_summary_pdf[cols].fillna("").values.tolist(),
+            row_height=20,
+        )
+    else:
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(40, height - 145, "No WTG summary available.")
+
+    # Per turbine power curve pages
+    summary_lookup = results["wtg_summary"].set_index("WTG") if not results["wtg_summary"].empty else pd.DataFrame()
     all_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
 
     for wtg in all_wtgs:
@@ -306,7 +489,7 @@ def build_power_curve_pdf(site_name: str, date_text: str, results: dict) -> byte
         img_reader = ImageReader(io.BytesIO(img_bytes))
 
         pdf.showPage()
-        draw_pdf_header(pdf, width, height, "Power Curve Analytic Report", site_name, date_text)
+        draw_pdf_header(pdf, width, height, "Power Curve Dashboard Report", site_name, date_text)
 
         perf_text = "NA" if pd.isna(perf) else f"{perf:.2f}%"
         dev_text = "NA" if pd.isna(dev) else f"{dev:.2f}%"
@@ -325,62 +508,85 @@ def build_power_curve_pdf(site_name: str, date_text: str, results: dict) -> byte
 
         pdf.drawImage(img_reader, 30, 40, width=width - 60, height=height - 230, preserveAspectRatio=True, mask="auto")
 
-    pdf.save()
-    pdf_buffer.seek(0)
-    return pdf_buffer.getvalue()
-
-
-def build_nacelle_pdf(site_name: str, date_text: str, results: dict) -> bytes:
-    if not (KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE):
-        raise RuntimeError("PDF export needs both kaleido and reportlab installed.")
-
-    if results["nacelle_summary"].empty:
-        raise RuntimeError("No nacelle data available for PDF export.")
-
-    pdf_buffer = io.BytesIO()
-    pdf = canvas.Canvas(pdf_buffer, pagesize=landscape(A4))
-    width, height = landscape(A4)
-
-    nacelle_lookup = results["nacelle_summary"].set_index("WTG")
-    all_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
-
-    for wtg in all_wtgs:
-        filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
-        filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionAve"]).copy()
-        filtered_wtg["NacelleBand"] = filtered_wtg["NacellePositionAve"].apply(get_nacelle_band)
-        nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
-
-        if filtered_wtg.empty:
-            continue
-
-        avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
-        band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
-        badge_color = get_nacelle_band_color(band)
-        text_color = "#000000" if band == "60-120" else "#FFFFFF"
-
-        fig = make_nacelle_plotly(results["ref"], filtered_wtg, nacelle_bins, wtg)
-        img_bytes = fig.to_image(format="png", width=1200, height=700, scale=1)
-        img_reader = ImageReader(io.BytesIO(img_bytes))
-
+    # Nacelle section
+    if results["has_nacelle"] and not results["nacelle_summary"].empty:
         pdf.showPage()
         draw_pdf_header(pdf, width, height, "Nacelle Position Report", site_name, date_text)
+        pdf.setFont("Helvetica-Bold", 13)
+        pdf.drawString(30, height - 120, "Nacelle Summary")
 
-        avg_text = "NA" if pd.isna(avg_nacelle) else f"{avg_nacelle:.2f}°"
-
-        draw_badge_pdf(
+        nacelle_cols = ["WTG", "ValidSamples", "MeanWindSpeed_mps", "MeanNacellePosition", "NacelleBand"]
+        draw_simple_table(
             pdf,
             x=30,
-            y=height - 155,
-            width=width - 60,
-            height=60,
-            fill_color_hex=badge_color,
-            title_text=wtg,
-            line1=f"Avg Nacelle Position: {avg_text}",
-            line2=f"Band: {band}",
-            text_color_hex=text_color,
+            y_top=height - 140,
+            col_widths=[120, 100, 130, 150, 120],
+            headers=nacelle_cols,
+            rows=results["nacelle_summary"][nacelle_cols].fillna("").values.tolist(),
+            row_height=20,
         )
 
-        pdf.drawImage(img_reader, 30, 40, width=width - 60, height=height - 230, preserveAspectRatio=True, mask="auto")
+        nacelle_lookup = results["nacelle_summary"].set_index("WTG")
+        all_nacelle_wtgs = sorted(results["nacelle_summary"]["WTG"].dropna().unique().tolist())
+
+        for wtg in all_nacelle_wtgs:
+            filtered_wtg = results["filtered"][results["filtered"]["WTG"] == wtg].copy()
+            filtered_wtg = filtered_wtg.dropna(subset=["NacellePositionAve"]).copy()
+            nacelle_bins = results["nacelle_bins"][results["nacelle_bins"]["WTG"] == wtg].copy()
+
+            if filtered_wtg.empty:
+                continue
+
+            avg_nacelle = nacelle_lookup.loc[wtg, "MeanNacellePosition"] if wtg in nacelle_lookup.index else np.nan
+            band = nacelle_lookup.loc[wtg, "NacelleBand"] if wtg in nacelle_lookup.index else "NA"
+            badge_color = get_nacelle_band_color(band)
+            text_color = "#000000" if band == "60-120" else "#FFFFFF"
+
+            fig = make_nacelle_plotly(results["ref"], filtered_wtg, nacelle_bins, wtg)
+            img_bytes = fig.to_image(format="png", width=1200, height=700, scale=1)
+            img_reader = ImageReader(io.BytesIO(img_bytes))
+
+            pdf.showPage()
+            draw_pdf_header(pdf, width, height, "Nacelle Position Report", site_name, date_text)
+
+            avg_text = "NA" if pd.isna(avg_nacelle) else f"{avg_nacelle:.2f}°"
+
+            draw_badge_pdf(
+                pdf,
+                x=30,
+                y=height - 155,
+                width=width - 60,
+                height=60,
+                fill_color_hex=badge_color,
+                title_text=wtg,
+                line1=f"Avg Nacelle Position: {avg_text}",
+                line2=f"Band: {band}",
+                text_color_hex=text_color,
+            )
+
+            pdf.drawImage(img_reader, 30, 40, width=width - 60, height=height - 230, preserveAspectRatio=True, mask="auto")
+
+    # Comparison section
+    comparison_wtgs = sorted(results["filtered"]["WTG"].dropna().unique().tolist())
+    if comparison_wtgs:
+        selected_for_report = comparison_wtgs[: min(10, len(comparison_wtgs))]
+        comparison_filtered = results["filtered"][results["filtered"]["WTG"].isin(selected_for_report)].copy()
+        comparison_bins = results["wtg_bins"][results["wtg_bins"]["WTG"].isin(selected_for_report)].copy()
+        comparison_fig = make_multi_turbine_comparison_plotly(
+            results["ref"],
+            comparison_filtered,
+            comparison_bins,
+            selected_for_report,
+            show_scatter=False,
+        )
+        comparison_img_bytes = comparison_fig.to_image(format="png", width=1200, height=700, scale=1)
+        comparison_img_reader = ImageReader(io.BytesIO(comparison_img_bytes))
+
+        pdf.showPage()
+        draw_pdf_header(pdf, width, height, "Multi-Turbine Comparison", site_name, date_text)
+        pdf.setFont("Helvetica", 10)
+        pdf.drawString(30, height - 110, f"Turbines included in report comparison: {', '.join(selected_for_report[:10])}")
+        pdf.drawImage(comparison_img_reader, 30, 40, width=width - 60, height=height - 180, preserveAspectRatio=True, mask="auto")
 
     pdf.save()
     pdf_buffer.seek(0)
@@ -388,12 +594,12 @@ def build_nacelle_pdf(site_name: str, date_text: str, results: dict) -> bytes:
 
 
 @st.cache_data(show_spinner=False)
-def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+def load_single_scada_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     if not file_name.lower().endswith(".csv"):
         raise ValueError("SCADA input must be a CSV file.")
 
     df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False)
-    ensure_required_columns(df, REQUIRED_SCADA_COLUMNS, "SCADA file")
+    ensure_required_columns(df, REQUIRED_SCADA_COLUMNS, f"SCADA file '{file_name}'")
 
     numeric_cols = [STATUS_COL, WIND_STD_COL, PITCH_STD_COL, WIND_SPEED_COL, POWER_COL]
     if NACELLE_COL in df.columns:
@@ -406,7 +612,102 @@ def load_scada(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce", dayfirst=True)
     df[WTG_COL] = df[WTG_COL].astype(str).str.strip()
+    df["SourceFile"] = file_name
     return df
+
+
+def load_scada_from_zip(zip_bytes: bytes, zip_name: str):
+    valid_frames = []
+    ingest_records = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+
+        for member in names:
+            if member.endswith("/"):
+                continue
+
+            if not member.lower().endswith(".csv"):
+                ingest_records.append(
+                    {
+                        "FileName": member,
+                        "Status": "Skipped",
+                        "RowsLoaded": 0,
+                        "Message": "Not a CSV file",
+                    }
+                )
+                continue
+
+            try:
+                file_bytes = zf.read(member)
+                df = load_single_scada_bytes(file_bytes, member)
+                valid_frames.append(df)
+                ingest_records.append(
+                    {
+                        "FileName": member,
+                        "Status": "Loaded",
+                        "RowsLoaded": len(df),
+                        "Message": "Loaded successfully",
+                    }
+                )
+            except Exception as exc:
+                ingest_records.append(
+                    {
+                        "FileName": member,
+                        "Status": "Invalid",
+                        "RowsLoaded": 0,
+                        "Message": str(exc),
+                    }
+                )
+
+    ingest_summary = pd.DataFrame(ingest_records)
+
+    if not valid_frames:
+        raise ValueError(f"No valid SCADA CSV files were found in archive '{zip_name}'.")
+
+    merged = pd.concat(valid_frames, ignore_index=True)
+    return merged, ingest_summary
+
+
+@st.cache_data(show_spinner=False)
+def load_scada_input(single_file_bytes, single_file_name, zip_file_bytes, zip_file_name):
+    if zip_file_bytes is not None and zip_file_name is not None:
+        scada_df, ingest_summary = load_scada_from_zip(zip_file_bytes, zip_file_name)
+        upload_summary = {
+            "upload_mode": "zip",
+            "uploaded_file_count": int(len(ingest_summary)),
+            "valid_file_count": int((ingest_summary["Status"] == "Loaded").sum()),
+            "invalid_file_count": int((ingest_summary["Status"] == "Invalid").sum()),
+            "skipped_file_count": int((ingest_summary["Status"] == "Skipped").sum()),
+            "total_rows_uploaded": int(len(scada_df)),
+            "archive_name": zip_file_name,
+        }
+        return scada_df, ingest_summary, upload_summary
+
+    if single_file_bytes is not None and single_file_name is not None:
+        scada_df = load_single_scada_bytes(single_file_bytes, single_file_name)
+        ingest_summary = pd.DataFrame(
+            [
+                {
+                    "FileName": single_file_name,
+                    "Status": "Loaded",
+                    "RowsLoaded": len(scada_df),
+                    "Message": "Loaded successfully",
+                }
+            ]
+        )
+        upload_summary = {
+            "upload_mode": "single_csv",
+            "uploaded_file_count": 1,
+            "valid_file_count": 1,
+            "invalid_file_count": 0,
+            "skipped_file_count": 0,
+            "total_rows_uploaded": int(len(scada_df)),
+            "archive_name": "",
+        }
+        return scada_df, ingest_summary, upload_summary
+
+    raise ValueError("Please upload either a SCADA CSV file or a ZIP containing SCADA CSV files.")
 
 
 @st.cache_data(show_spinner=False)
@@ -458,7 +759,62 @@ def load_reference_curves(file_bytes: bytes, file_name: str) -> dict[str, pd.Dat
     return curves
 
 
-def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFrame | int]:
+def build_turbine_reason_tables(raw_scada: pd.DataFrame, date_filtered_scada: pd.DataFrame, filtered_final: pd.DataFrame):
+    raw_counts = (
+        raw_scada.groupby(WTG_COL)
+        .size()
+        .reset_index(name="UploadedRows")
+        .rename(columns={WTG_COL: "WTG"})
+    )
+
+    date_counts = (
+        date_filtered_scada.groupby(WTG_COL)
+        .size()
+        .reset_index(name="RowsInDateRange")
+        .rename(columns={WTG_COL: "WTG"})
+    )
+
+    final_counts = (
+        filtered_final.groupby("WTG")
+        .size()
+        .reset_index(name="ValidSamples")
+    )
+
+    merged = raw_counts.merge(date_counts, on="WTG", how="left").merge(final_counts, on="WTG", how="left")
+    merged["RowsInDateRange"] = merged["RowsInDateRange"].fillna(0).astype(int)
+    merged["ValidSamples"] = merged["ValidSamples"].fillna(0).astype(int)
+
+    def classify_reason(row):
+        if row["RowsInDateRange"] == 0:
+            return "No rows available in selected date range"
+        if row["ValidSamples"] == 0:
+            return "Rows exist in date range but none passed filter/reference checks"
+        if row["ValidSamples"] < LOW_DATA_THRESHOLD:
+            return "Low number of valid rows after filtering"
+        return "Working"
+
+    merged["Reason"] = merged.apply(classify_reason, axis=1)
+
+    missing_turbines = merged[merged["ValidSamples"] == 0][["WTG", "UploadedRows", "RowsInDateRange", "Reason"]].copy()
+    low_data_turbines = merged[
+        (merged["ValidSamples"] > 0) & (merged["ValidSamples"] < LOW_DATA_THRESHOLD)
+    ][["WTG", "ValidSamples", "Reason"]].copy()
+    low_data_turbines["Threshold"] = LOW_DATA_THRESHOLD
+    low_data_turbines = low_data_turbines[["WTG", "ValidSamples", "Threshold", "Reason"]]
+
+    working_turbines = merged[merged["ValidSamples"] > 0].copy()
+
+    coverage_summary = {
+        "uploaded_turbines": int(merged["WTG"].nunique()),
+        "working_turbines": int((merged["ValidSamples"] > 0).sum()),
+        "missing_turbines": int((merged["ValidSamples"] == 0).sum()),
+        "low_data_turbines": int(((merged["ValidSamples"] > 0) & (merged["ValidSamples"] < LOW_DATA_THRESHOLD)).sum()),
+    }
+
+    return missing_turbines, low_data_turbines, working_turbines, coverage_summary
+
+
+def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame, raw_scada_full: pd.DataFrame | None = None) -> dict[str, pd.DataFrame | int]:
     working = scada.copy()
 
     mask_status = working[STATUS_COL].eq(100)
@@ -595,6 +951,13 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         ]
     ].sort_values("Performance_pct")
 
+    raw_for_reason = raw_scada_full.copy() if raw_scada_full is not None else scada.copy()
+    missing_turbines, low_data_turbines, working_turbines, coverage_summary = build_turbine_reason_tables(
+        raw_for_reason,
+        scada,
+        filtered,
+    )
+
     results = {
         "filtered": filtered,
         "filter_counts": filter_counts,
@@ -605,10 +968,16 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
         "rows_compared": len(filtered),
         "wtg_count": int(filtered["WTG"].nunique()),
         "has_nacelle": "NacellePositionAve" in filtered.columns,
+        "missing_turbines": missing_turbines,
+        "low_data_turbines": low_data_turbines,
+        "working_turbines_df": working_turbines,
+        "turbine_coverage_summary": coverage_summary,
+        "raw_wtg_count": int(raw_for_reason[WTG_COL].nunique()),
+        "working_wtg_count": coverage_summary["working_turbines"],
+        "missing_wtg_count": coverage_summary["missing_turbines"],
+        "low_data_wtg_count": coverage_summary["low_data_turbines"],
     }
 
-    # Tab 2 data is prepared separately. This does not change the Tab 1 power-curve
-    # calculations, filters, bins, summaries, or graph.
     if "NacellePositionAve" in filtered.columns:
         nacelle_filtered = filtered.dropna(subset=["NacellePositionAve"]).copy()
         nacelle_filtered["NacelleBand"] = nacelle_filtered["NacellePositionAve"].apply(get_nacelle_band)
@@ -661,7 +1030,6 @@ def run_analysis(scada: pd.DataFrame, ref: pd.DataFrame) -> dict[str, pd.DataFra
 def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
     fig = go.Figure()
 
-    # 1. Draw power sample scatter points first (SVG trace keeps layer order consistent).
     fig.add_trace(
         go.Scatter(
             x=filtered_wtg["WindSpeed_mps"],
@@ -677,7 +1045,6 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         )
     )
 
-    # 2. Draw the reference curve over the scatter points.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -688,7 +1055,6 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
         )
     )
 
-    # 3. Draw the mean-by-bin line on top of both previous traces.
     if not wtg_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -716,11 +1082,6 @@ def make_wtg_power_curve_plotly(ref, filtered_wtg, wtg_bins, wtg_name):
 
 
 def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
-    """Tab 2 power-curve-style graph with nacelle-std-coloured samples.
-
-    Trace order is intentional: scatter samples first, then reference curve,
-    then mean-by-wind-bin line, so both lines render over the scatter points.
-    """
     fig = go.Figure()
 
     if "NacellePositionStd" in filtered_wtg.columns:
@@ -730,8 +1091,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
     else:
         plot_df = pd.DataFrame()
 
-    # 1. Plot all scatter samples first. Use go.Scatter (SVG) to preserve
-    # consistent trace layering with the reference and mean-bin lines.
     if not plot_df.empty:
         custom_columns = ["NacellePositionStd"]
         if "NacellePositionAve" in plot_df.columns:
@@ -766,7 +1125,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
             )
         )
 
-    # 2. Draw the reference curve on top of the scatter samples.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -777,7 +1135,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
         )
     )
 
-    # 3. Draw the mean active-power-by-wind-speed-bin line last, on top.
     if not nacelle_bins.empty:
         fig.add_trace(
             go.Scatter(
@@ -806,11 +1163,6 @@ def make_nacelle_plotly(ref, filtered_wtg, nacelle_bins, wtg_name):
 
 
 def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs, show_scatter=False):
-    """Combined power-curve comparison for selected turbines in Tab 3.
-
-    Scatter samples are optional and are hidden by default. When enabled,
-    they are drawn first, followed by the reference and mean-bin lines.
-    """
     fig = go.Figure()
     palette = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
@@ -818,8 +1170,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         "#003f5c", "#ffa600", "#665191", "#a05195", "#d45087",
     ]
 
-    # Optional scatter samples are added first so the reference and mean-bin
-    # lines are rendered over them. Scatters are OFF by default.
     if show_scatter:
         for i, wtg in enumerate(selected_wtgs):
             turbine_df = filtered[filtered["WTG"] == wtg]
@@ -841,7 +1191,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
                 )
             )
 
-    # Reference curve appears over any optional scatter samples.
     fig.add_trace(
         go.Scatter(
             x=ref["ReferenceWindSpeed_mps"],
@@ -853,7 +1202,6 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
         )
     )
 
-    # Mean-by-wind-bin lines are drawn last and labelled with turbine names.
     for i, wtg in enumerate(selected_wtgs):
         turbine_bins = wtg_bins[wtg_bins["WTG"] == wtg]
         if turbine_bins.empty:
@@ -893,10 +1241,11 @@ def make_multi_turbine_comparison_plotly(ref, filtered, wtg_bins, selected_wtgs,
 
 st.sidebar.header("Upload Files")
 uploaded_scada = st.sidebar.file_uploader("Upload SCADA CSV", type=["csv"])
+uploaded_scada_zip = st.sidebar.file_uploader("Upload SCADA ZIP", type=["zip"])
 uploaded_ref = st.sidebar.file_uploader("Upload Reference Excel", type=["xlsx"])
 
-if uploaded_scada is None:
-    st.info("Please upload the SCADA CSV file.")
+if uploaded_scada is None and uploaded_scada_zip is None:
+    st.info("Please upload either the SCADA CSV file or a ZIP containing SCADA CSV files.")
     st.stop()
 
 if uploaded_ref is None:
@@ -904,7 +1253,12 @@ if uploaded_ref is None:
     st.stop()
 
 try:
-    scada = load_scada(uploaded_scada.getvalue(), uploaded_scada.name)
+    scada, file_ingest_summary, upload_summary = load_scada_input(
+        uploaded_scada.getvalue() if uploaded_scada else None,
+        uploaded_scada.name if uploaded_scada else None,
+        uploaded_scada_zip.getvalue() if uploaded_scada_zip else None,
+        uploaded_scada_zip.name if uploaded_scada_zip else None,
+    )
     reference_curves = load_reference_curves(uploaded_ref.getvalue(), uploaded_ref.name)
 except Exception as exc:
     st.exception(exc)
@@ -979,65 +1333,86 @@ if scada_filtered.empty:
     st.stop()
 
 try:
-    results = run_analysis(scada_filtered, reference_curves[selected_curve])
+    results = run_analysis(scada_filtered, reference_curves[selected_curve], raw_scada_full=scada)
+    results["file_ingest_summary"] = file_ingest_summary
+    results["upload_summary"] = upload_summary
 except Exception as exc:
     st.exception(exc)
     st.stop()
+
+st.subheader("Upload Summary")
+u1, u2, u3, u4 = st.columns(4)
+u1.metric("Uploaded files", upload_summary["uploaded_file_count"])
+u2.metric("Valid SCADA files", upload_summary["valid_file_count"])
+u3.metric("Invalid files", upload_summary["invalid_file_count"])
+u4.metric("Rows uploaded", f"{upload_summary['total_rows_uploaded']:,}")
+
+if upload_summary["upload_mode"] == "zip":
+    st.caption(f"Archive: {upload_summary['archive_name']}")
+
+st.subheader("Turbine Coverage Summary")
+t1, t2, t3, t4 = st.columns(4)
+t1.metric("Uploaded turbines", results["turbine_coverage_summary"]["uploaded_turbines"])
+t2.metric("Working turbines", results["turbine_coverage_summary"]["working_turbines"])
+t3.metric("Missing turbines", results["turbine_coverage_summary"]["missing_turbines"])
+t4.metric("Low-data turbines", results["turbine_coverage_summary"]["low_data_turbines"])
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Rows passing filters", f"{results['rows_passing']:,}")
 c2.metric("Rows compared", f"{results['rows_compared']:,}")
 c3.metric("WTGs analysed", f"{results['wtg_count']:,}")
 
+st.subheader("File Ingest Details")
+st.dataframe(file_ingest_summary, use_container_width=True, hide_index=True)
+
+st.subheader("Data Availability")
+da1, da2 = st.columns(2)
+
+with da1:
+    st.markdown("### Missing Turbines")
+    if results["missing_turbines"].empty:
+        st.success("No missing turbines.")
+    else:
+        st.dataframe(results["missing_turbines"], use_container_width=True, hide_index=True)
+
+with da2:
+    st.markdown("### Low-Data Turbines")
+    if results["low_data_turbines"].empty:
+        st.success("No low-data turbines.")
+    else:
+        st.dataframe(results["low_data_turbines"], use_container_width=True, hide_index=True)
+
 st.subheader("PDF Downloads")
 pdf_col1, pdf_col2 = st.columns(2)
 
 with pdf_col1:
     if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
-        if st.button("Prepare Power Curve PDF"):
-            with st.spinner("Generating Power Curve PDF..."):
+        if st.button("Prepare Full Dashboard PDF"):
+            with st.spinner("Generating dashboard PDF..."):
                 try:
-                    st.session_state["power_pdf_bytes"] = build_power_curve_pdf(site_name, date_text, results)
-                    st.success("Power Curve PDF is ready.")
+                    st.session_state["dashboard_pdf_bytes"] = build_dashboard_pdf(site_name, date_text, results)
+                    st.success("Dashboard PDF is ready.")
                 except Exception as exc:
-                    st.error(f"Power curve PDF could not be generated: {exc}")
+                    st.error(f"Dashboard PDF could not be generated: {exc}")
 
-        if "power_pdf_bytes" in st.session_state:
+        if "dashboard_pdf_bytes" in st.session_state:
             st.download_button(
-                "Download Power Curve PDF",
-                data=st.session_state["power_pdf_bytes"],
-                file_name="power_curve_report.pdf",
+                "Download Full Dashboard PDF",
+                data=st.session_state["dashboard_pdf_bytes"],
+                file_name="power_curve_dashboard_report.pdf",
                 mime="application/pdf",
             )
     else:
         st.info(
-            f"Power curve PDF export requires kaleido and reportlab. "
+            f"Dashboard PDF export requires kaleido and reportlab. "
             f"Kaleido: {KALEIDO_IMPORT_ERROR or 'OK'} | Reportlab: {REPORTLAB_IMPORT_ERROR or 'OK'}"
         )
 
 with pdf_col2:
     if results["has_nacelle"]:
-        if KALEIDO_AVAILABLE and REPORTLAB_AVAILABLE:
-            if st.button("Prepare Nacelle PDF"):
-                with st.spinner("Generating Nacelle PDF..."):
-                    try:
-                        st.session_state["nacelle_pdf_bytes"] = build_nacelle_pdf(site_name, date_text, results)
-                        st.success("Nacelle PDF is ready.")
-                    except Exception as exc:
-                        st.error(f"Nacelle PDF could not be generated: {exc}")
-
-            if "nacelle_pdf_bytes" in st.session_state:
-                st.download_button(
-                    "Download Nacelle PDF",
-                    data=st.session_state["nacelle_pdf_bytes"],
-                    file_name="nacelle_report.pdf",
-                    mime="application/pdf",
-                )
-        else:
-            st.info(
-                f"Nacelle PDF export requires kaleido and reportlab. "
-                f"Kaleido: {KALEIDO_IMPORT_ERROR or 'OK'} | Reportlab: {REPORTLAB_IMPORT_ERROR or 'OK'}"
-            )
+        st.info("Nacelle section is included automatically inside the full dashboard PDF when data exists.")
+    else:
+        st.info("Nacelle section is not included because nacelle data is unavailable.")
 
 if results["has_nacelle"]:
     tab1, tab2, tab3 = st.tabs([
